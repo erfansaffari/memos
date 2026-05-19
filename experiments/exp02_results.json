@@ -1,0 +1,176 @@
+{
+  "experiment": "exp02_intent_aware_router_fix",
+  "run_at": "2026-05-19T05:48:36.453916+00:00",
+  "summary": {
+    "mean_exp2_score": 9.2,
+    "mean_exp1_hier_score": 7.9,
+    "improvement": 1.299999999999999,
+    "improvements": 2,
+    "regressions": 3,
+    "ties": 5
+  },
+  "results": [
+    {
+      "id": "q01",
+      "query": "What is my name?",
+      "description": "Simple identity \u2014 Level 1",
+      "exp2_score": 10.0,
+      "exp1_hier_score": 10.0,
+      "delta_vs_exp1": 0.0,
+      "mem_count": 3,
+      "intent": "factual",
+      "budget": "shallow",
+      "levels_used": [
+        1
+      ],
+      "reasoning": "The memory context directly states the user's name is Erfan Saffari, perfectly answering the query."
+    },
+    {
+      "id": "q02",
+      "query": "What university do I go to?",
+      "description": "Simple identity \u2014 Level 1",
+      "exp2_score": 10.0,
+      "exp1_hier_score": 10.0,
+      "delta_vs_exp1": 0.0,
+      "mem_count": 3,
+      "intent": "factual",
+      "budget": "shallow",
+      "levels_used": [
+        1
+      ],
+      "reasoning": "The memory context directly states you are a CS student at the University of Waterloo, which perfectly answers the query."
+    },
+    {
+      "id": "q03",
+      "query": "What programming language do I prefer?",
+      "description": "Preference \u2014 Level 1",
+      "exp2_score": 10.0,
+      "exp1_hier_score": 10.0,
+      "delta_vs_exp1": 0.0,
+      "mem_count": 4,
+      "intent": "factual",
+      "budget": "shallow",
+      "levels_used": [
+        1
+      ],
+      "reasoning": "Memory directly states that you primarily code in Python and prefer clean, well-typed code with type hints, perfectly answering the query."
+    },
+    {
+      "id": "q04",
+      "query": "What is MemOS built with? What are its main technologies?",
+      "description": "Project architecture \u2014 Level 2",
+      "exp2_score": 9.0,
+      "exp1_hier_score": 10.0,
+      "delta_vs_exp1": -1.0,
+      "mem_count": 9,
+      "intent": "project",
+      "budget": "medium",
+      "levels_used": [
+        1,
+        2
+      ],
+      "reasoning": "Memory context directly addresses the query with specific technical stack details: LangGraph, Anthropic Claude API, ChromaDB, SQLAlchemy, SQLite, sentence-transformers, Typer, and Rich \u2014 covering all main technologies used in MemOS."
+    },
+    {
+      "id": "q05",
+      "query": "What embedding model does MemOS use for vector search?",
+      "description": "Project decision \u2014 Level 2/3",
+      "exp2_score": 10.0,
+      "exp1_hier_score": 10.0,
+      "delta_vs_exp1": 0.0,
+      "mem_count": 9,
+      "intent": "project",
+      "budget": "medium",
+      "levels_used": [
+        1,
+        2
+      ],
+      "reasoning": "Memory context directly states that MemOS uses sentence-transformers all-MiniLM-L6-v2 embeddings for vector search with ChromaDB."
+    },
+    {
+      "id": "q06",
+      "query": "How does the memory hierarchy work in MemOS?",
+      "description": "Design-reasoning \u2014 FAILURE in Exp 1 (was 0.0)",
+      "exp2_score": 9.0,
+      "exp1_hier_score": 0.0,
+      "delta_vs_exp1": 9.0,
+      "mem_count": 14,
+      "intent": "design-reasoning",
+      "budget": "deep",
+      "levels_used": [
+        1,
+        2,
+        3
+      ],
+      "reasoning": "Retrieved memories directly explain MemOS's 3-level hierarchy (Identity, Project, Episodic) with dynamic router selection, and provide extensive supporting details on implementation (SQLAlchemy, ChromaDB, LangGraph), making them highly relevant and comprehensive for answering the query."
+    },
+    {
+      "id": "q07",
+      "query": "What bug did we fix with ChromaDB and what was the root cause?",
+      "description": "Session bug fix \u2014 Level 3",
+      "exp2_score": 9.0,
+      "exp1_hier_score": 10.0,
+      "delta_vs_exp1": -1.0,
+      "mem_count": 14,
+      "intent": "episodic",
+      "budget": "deep",
+      "levels_used": [
+        1,
+        2,
+        3
+      ],
+      "reasoning": "The memory context directly identifies the ChromaDB bug (persistence issue between sessions) and root cause (using EphemeralClient instead of PersistentClient) with session date context, with only minor noise from other project details."
+    },
+    {
+      "id": "q08",
+      "query": "What did we decide about how to handle memory contradictions?",
+      "description": "Past design decision \u2014 Level 3",
+      "exp2_score": 9.0,
+      "exp1_hier_score": 10.0,
+      "delta_vs_exp1": -1.0,
+      "mem_count": 14,
+      "intent": "design-reasoning",
+      "budget": "deep",
+      "levels_used": [
+        1,
+        2,
+        3
+      ],
+      "reasoning": "The memory context directly addresses the query with a specific episodic memory from 2026-05-18 stating that memory contradictions should use confidence decay rather than hard deletion to model epistemic uncertainty."
+    },
+    {
+      "id": "q09",
+      "query": "What were the results of the retrieval comparison experiment?",
+      "description": "Past experiment results \u2014 Level 3",
+      "exp2_score": 7.0,
+      "exp1_hier_score": 7.0,
+      "delta_vs_exp1": 0.0,
+      "mem_count": 14,
+      "intent": "episodic",
+      "budget": "deep",
+      "levels_used": [
+        1,
+        2,
+        3
+      ],
+      "reasoning": "One memory directly answers the query with specific results (hierarchical retrieval scored 2.3 points higher than flat retrieval), though additional experimental details and context are limited."
+    },
+    {
+      "id": "q10",
+      "query": "Why do we use Claude Haiku for the router instead of Sonnet?",
+      "description": "Design-reasoning \u2014 FAILURE in Exp 1 (was 2.0)",
+      "exp2_score": 9.0,
+      "exp1_hier_score": 2.0,
+      "delta_vs_exp1": 7.0,
+      "mem_count": 14,
+      "intent": "design-reasoning",
+      "budget": "deep",
+      "levels_used": [
+        1,
+        2,
+        3
+      ],
+      "reasoning": "The memory context directly answers the query with a specific design decision: Claude Haiku was chosen for the router to minimize latency and cost (keeping per-turn cost under $0.01), while Sonnet is reserved for user-facing responses."
+    }
+  ]
+}
