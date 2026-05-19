@@ -107,6 +107,21 @@ class MemoryRecord(Base):
     frequency = Column(Integer, default=0)
 
 
+class ImportLog(Base):
+    """One row per imported chat-history file, keyed by SHA-256 hash."""
+
+    __tablename__ = "import_log"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    file_hash = Column(String, nullable=False, unique=True)
+    platform = Column(String, nullable=False)
+    imported_at = Column(DateTime, nullable=False)
+    file_name = Column(String, nullable=True)
+    turns_processed = Column(Integer, default=0)
+    memories_added = Column(Integer, default=0)
+    memories_skipped_duplicate = Column(Integer, default=0)
+
+
 # ---------------------------------------------------------------------------
 # Store
 # ---------------------------------------------------------------------------
@@ -231,6 +246,43 @@ class MemoryStore:
             "by_level": by_level,
             "total": sum(by_level.values()),
         }
+
+    # ------------------------------------------------------------------
+    # Import log
+    # ------------------------------------------------------------------
+
+    def import_already_processed(self, file_hash: str) -> bool:
+        """Return True if a file with this SHA-256 hash was already imported."""
+        with self.SessionLocal() as session:
+            return (
+                session.query(ImportLog)
+                .filter_by(file_hash=file_hash)
+                .count()
+            ) > 0
+
+    def log_import(
+        self,
+        file_hash: str,
+        platform: str,
+        file_name: str,
+        turns: int,
+        added: int,
+        skipped: int,
+    ) -> None:
+        """Write a single import log entry."""
+        with self.SessionLocal() as session:
+            entry = ImportLog(
+                id=str(uuid.uuid4()),
+                file_hash=file_hash,
+                platform=platform,
+                imported_at=datetime.now(timezone.utc),
+                file_name=file_name,
+                turns_processed=turns,
+                memories_added=added,
+                memories_skipped_duplicate=skipped,
+            )
+            session.merge(entry)
+            session.commit()
 
     # ------------------------------------------------------------------
     # Internal

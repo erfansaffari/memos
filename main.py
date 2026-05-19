@@ -6,6 +6,7 @@ Commands:
     memories  — List all stored memories in a Rich table
     stats     — Show memory counts by level
     clear     — Delete all memories (with optional --force)
+    import    — Import chat history from Claude, ChatGPT, or Gemini exports
 
 During a chat session, you can also type:
     memories  — show memory table inline
@@ -194,6 +195,87 @@ def clear(
     count = memory_store.delete_all()
     vector_store.delete_all()
     console.print(f"[bold red]Deleted {count} memories from SQLite and ChromaDB.[/bold red]")
+
+
+@app.command(name="import")
+def import_history(
+    file: str = typer.Option(..., "--file", "-f", help="Path to exported chat file."),
+    platform: str = typer.Option(
+        ...,
+        "--platform",
+        "-p",
+        help="Export format: claude | chatgpt | gemini",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Parse and count without writing to memory."
+    ),
+) -> None:
+    """Import chat history from Claude, ChatGPT, or Gemini exports into MemOS memory."""
+    from pathlib import Path
+
+    from importers.importer import PARSERS, run_import
+
+    if not Path(file).exists():
+        console.print(f"[bold red]Error:[/bold red] File not found: {file}")
+        raise typer.Exit(1)
+
+    supported = list(PARSERS.keys())
+    if platform not in supported:
+        console.print(
+            f"[bold red]Error:[/bold red] Unknown platform '{platform}'.\n"
+            f"Supported: {', '.join(supported)}"
+        )
+        raise typer.Exit(1)
+
+    client = _require_client()
+    memory_store, vector_store = _get_stores()
+
+    from agents.extractor import ExtractionAgent
+    from agents.verifier import VerifierAgent
+
+    extractor = ExtractionAgent(client)
+    verifier = VerifierAgent(client)
+
+    if dry_run:
+        console.print(
+            Panel(
+                f"[bold yellow]Dry-run mode[/bold yellow] — no memories will be written.\n"
+                f"File: [cyan]{file}[/cyan]  Platform: [cyan]{platform}[/cyan]",
+                border_style="yellow",
+            )
+        )
+    else:
+        console.print(
+            Panel(
+                f"Importing [cyan]{Path(file).name}[/cyan] "
+                f"([bold]{platform}[/bold] format)…",
+                border_style="cyan",
+            )
+        )
+
+    result = run_import(
+        filepath=file,
+        platform=platform,
+        store=memory_store,
+        vector_store=vector_store,
+        extractor=extractor,
+        verifier=verifier,
+        dry_run=dry_run,
+    )
+
+    if result["already_imported"]:
+        console.print(
+            "[yellow]This file was already imported (duplicate SHA-256). Skipping.[/yellow]"
+        )
+        raise typer.Exit()
+
+    verb = "Would add" if dry_run else "Added"
+    console.print(
+        f"[bold green]Done.[/bold green]  "
+        f"Turns processed: {result['turns']}  •  "
+        f"{verb}: [bold]{result['added']}[/bold] memories  •  "
+        f"Skipped duplicates: {result['skipped']}"
+    )
 
 
 # ---------------------------------------------------------------------------
