@@ -35,6 +35,7 @@ htmlcov/
 # Weights & Biases
 wandb/
 experiments/exp01_results.json
+experiments/exp02_results.json
 
 # Jupyter
 .ipynb_checkpoints/

@@ -26,9 +26,16 @@ class VectorStore:
 
     COLLECTION_NAME = "memories"
 
-    def __init__(self, persist_path: str = str(CHROMA_PATH)) -> None:
-        CHROMA_PATH.mkdir(parents=True, exist_ok=True)
-        self.client = chromadb.PersistentClient(path=persist_path)
+    def __init__(
+        self,
+        persist_path: str = str(CHROMA_PATH),
+        *,
+        persist_dir: Optional[str] = None,
+    ) -> None:
+        path = persist_dir if persist_dir is not None else persist_path
+        import pathlib
+        pathlib.Path(path).mkdir(parents=True, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=path)
         self.collection = self.client.get_or_create_collection(
             name=self.COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
@@ -142,6 +149,26 @@ class VectorStore:
                     }
                 )
         return hits
+
+    def query(
+        self,
+        query_text: str,
+        level: Optional[int] = None,
+        n_results: int = 10,
+        min_confidence: float = 0.3,
+    ) -> list[dict]:
+        """
+        Alias for search() with positional query_text for experiment compatibility.
+
+        Accepts level as int or MemoryLevel enum (both coerce to int).
+        """
+        level_int = int(level) if level is not None else None
+        return self.search(
+            query_text,
+            n_results=n_results,
+            level=level_int,
+            min_confidence=min_confidence,
+        )
 
     def count(self) -> int:
         return self.collection.count()

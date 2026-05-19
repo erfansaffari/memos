@@ -146,7 +146,8 @@ memos/
 │   └── router.py                    # Hierarchical retrieval router
 │
 ├── experiments/
-│   └── exp01_retrieval_comparison.py  # Flat vs hierarchical benchmark
+│   ├── exp01_retrieval_comparison.py  # Flat vs hierarchical benchmark
+│   └── exp02_router_intent_fix.py     # Intent-aware router fix validation
 │
 ├── evaluation/                      # (future) evaluation utilities
 ├── prompts/                         # (future) prompt versioning
@@ -166,7 +167,60 @@ Seeds 14 diverse memories across all 3 levels, then runs 10 test queries through
 
 Claude Haiku judges each retrieved context for relevance (0–10). Results are logged to Weights & Biases.
 
-**Expected hypothesis:** Hierarchical retrieval scores higher on complex queries (needs Level 3) and simple queries (Level 1 only, no noise).
+### Results
+
+| Metric | Hierarchical | Flat |
+|--------|-------------|------|
+| Mean relevance score | 7.90/10 | 9.20/10 |
+| Score delta | −1.30 | — |
+| Wins | 1 | 2 |
+| Ties | 7 | 7 |
+
+| Query | Hier | Flat | Delta |
+|-------|------|------|-------|
+| What is my name? | 10.0 | 10.0 | 0.0 |
+| What university do I go to? | 10.0 | 10.0 | 0.0 |
+| What programming language do I prefer? | 10.0 | 10.0 | 0.0 |
+| What is MemOS built with? | 10.0 | 9.0 | **+1.0** |
+| What embedding model does MemOS use? | 10.0 | 10.0 | 0.0 |
+| **How does the memory hierarchy work?** | **0.0** | 7.0 | **−7.0** |
+| What bug did we fix with ChromaDB? | 10.0 | 10.0 | 0.0 |
+| What did we decide about memory contradictions? | 10.0 | 10.0 | 0.0 |
+| What were the retrieval experiment results? | 7.0 | 7.0 | 0.0 |
+| **Why do we use Claude Haiku for the router?** | **2.0** | 9.0 | **−7.0** |
+
+**Key finding:** Hierarchical matched or beat flat on 8/10 queries. The two failures were **design-reasoning queries** — questions asking *why* or *how* something was designed — where the v1 router misclassified the query depth and never fetched Level 3 episodic memories where design rationale lives. Flat search found the answers by searching everything indiscriminately.
+
+This points to a concrete fix: the router needs a `design-reasoning` intent class that always routes to Level 3 with a deep budget.
+
+---
+
+## Experiment 2: Intent-Aware Router Fix
+
+**File:** `experiments/exp02_router_intent_fix.py`
+
+**Hypothesis:** Adding a `design-reasoning` intent class to the retrieval router will fix the two Experiment 1 failures (q06, q10) without degrading performance on other query types, improving mean hierarchical score from 7.90 → 9.0+.
+
+**Change:** The router now classifies queries into four intent types:
+
+| Intent | Trigger | Levels | Budget |
+|--------|---------|--------|--------|
+| `factual` | Name, basic identity facts | [1] | shallow |
+| `project` | What is X built with? | [1, 2] | medium |
+| `design-reasoning` | Why/how was X designed? | [1, 2, 3] | deep |
+| `episodic` | Bugs, session details, past results | [2, 3] | deep |
+
+**Critical rule:** Any question containing "why", "how does", "what was the reasoning", "why do we use" is *always* `design-reasoning` → forced to `levels=[1,2,3]` and `budget=deep`.
+
+```bash
+python experiments/exp02_router_intent_fix.py
+```
+
+**The fix is working if:**
+- q06 score improves: 0.0 → 7.0+
+- q10 score improves: 2.0 → 7.0+
+- No other query regresses below its Experiment 1 score
+- Mean improves from 7.90 → 9.0+
 
 ---
 

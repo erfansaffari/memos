@@ -173,21 +173,35 @@ class MemoryStore:
     # Read
     # ------------------------------------------------------------------
 
-    def get_by_level(
-        self, level: int, min_confidence: float = 0.3
-    ) -> list[MemoryItem]:
-        """Get all memories at a given level above a confidence threshold."""
+    def upsert(self, item: MemoryItem) -> None:
+        """Alias for save() — insert or replace a memory record."""
+        self.save(item)
+
+    def get_by_id(self, memory_id: str) -> Optional[MemoryItem]:
+        """Look up a single memory by its UUID. Returns None if not found."""
         with self.SessionLocal() as session:
-            records = (
+            record = session.get(MemoryRecord, memory_id)
+            return self._to_item(record) if record else None
+
+    def get_by_level(
+        self,
+        level: int,
+        min_confidence: float = 0.3,
+        limit: Optional[int] = None,
+    ) -> list[MemoryItem]:
+        """Get memories at a given level above a confidence threshold."""
+        with self.SessionLocal() as session:
+            q = (
                 session.query(MemoryRecord)
                 .filter(
-                    MemoryRecord.level == level,
+                    MemoryRecord.level == int(level),
                     MemoryRecord.confidence >= min_confidence,
                 )
                 .order_by(MemoryRecord.importance.desc())
-                .all()
             )
-            return [self._to_item(r) for r in records]
+            if limit is not None:
+                q = q.limit(limit)
+            return [self._to_item(r) for r in q.all()]
 
     def get_all(self, min_confidence: float = 0.0) -> list[MemoryItem]:
         """Get all memories ordered by level then importance descending."""
@@ -209,6 +223,14 @@ class MemoryStore:
                 .count()
                 for lvl in (1, 2, 3)
             }
+
+    def stats(self) -> dict:
+        """Return summary statistics: total count and per-level breakdown."""
+        by_level = self.count_by_level()
+        return {
+            "by_level": by_level,
+            "total": sum(by_level.values()),
+        }
 
     # ------------------------------------------------------------------
     # Internal
