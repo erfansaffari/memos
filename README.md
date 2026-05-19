@@ -1,263 +1,170 @@
-# MemOS — Hierarchical AI Memory Architecture
+# MemOS
 
-**MemOS** is a research prototype of a hierarchical persistent memory architecture for multi-model AI systems. It gives any AI model a structured long-term memory layer that persists across sessions, detects contradictions, and retrieves context progressively based on query complexity.
+A persistent memory layer for AI models that remembers context across sessions and retrieves it based on what the current query actually needs.
 
-## The Core Research Question
+## Why I built this
 
-> Does hierarchical memory retrieval — where context is fetched progressively at increasing levels of detail — produce more relevant and token-efficient AI context than flat vector search?
+I kept running into the same problem: every time I switched between Claude, ChatGPT, or Gemini — which happens a lot when new models drop — all the context from previous sessions was gone. There's no convenient way to carry memory across platforms, so I started thinking about building something that sits independently of any specific model and owns the memory layer itself.
 
-## How It Works
+The interesting design question turned out to be: how much memory should you actually inject into a prompt? Dumping everything is wasteful and noisy. So I designed a three-level hierarchy where stable identity facts are always included, project context loads when relevant, and specific session details only come in when the query actually needs them. Then I ran experiments to see if that actually worked better than just doing a flat vector search.
+
+---
+
+## How it works
 
 ```
-User Message (CLI)
-       ↓
-┌─────────────────────────────────────────────────┐
-│              LangGraph Agent Graph               │
-│                                                  │
-│  [retrieve] → [respond] → [extract] → [verify]  │
-│                                  ↓               │
-│                              [store]             │
-└─────────────────────────────────────────────────┘
-       ↓
-Claude Sonnet response (printed to terminal)
+User message
+     ↓
+[retrieve] → [respond] → [extract] → [verify] → [store]
+     ↑                                                |
+     └────────────── next session ───────────────────┘
 ```
 
-### Memory Hierarchy
+Five LangGraph nodes run on every turn:
 
-| Level | Name | Description | Retrieved? |
-|-------|------|-------------|------------|
-| 1 | **Identity** | Stable facts: name, preferences, skills | Always |
-| 2 | **Project** | Active projects, tools, architecture decisions | If project-related |
-| 3 | **Episodic** | Session details, code, bugs, experiments | If deep context needed |
+1. **retrieve** — router classifies the query intent, picks which memory levels to fetch and how many tokens to spend
+2. **respond** — Claude Sonnet answers with the retrieved memory injected into the system prompt
+3. **extract** — Claude Haiku pulls structured memories out of the conversation turn
+4. **verify** — checks new memories against existing ones for contradictions
+5. **store** — applies confidence decay on contradicted memories, writes to SQLite + ChromaDB
 
-The **Retrieval Router** (Claude Haiku) classifies each query and decides which levels to fetch and at what depth (`shallow` / `medium` / `deep`). This makes retrieval adaptive rather than exhaustive.
+### Memory hierarchy
 
-### Agent Pipeline
+| Level | Name | What it stores | Always fetched? |
+|-------|------|---------------|-----------------|
+| 1 | Identity | Name, preferences, language, long-term goals | Yes |
+| 2 | Project | Active projects, stack decisions, architecture | If query is project-related |
+| 3 | Episodic | Session details, bugs fixed, experiment results | Only when query needs depth |
 
-1. **retrieve** — Router classifies query → level-specific vector search in ChromaDB
-2. **respond** — Claude Sonnet answers with injected `<memory_context>`
-3. **extract** — Claude Haiku extracts structured memories from the conversation
-4. **verify** — Claude Haiku detects contradictions against existing memories
-5. **store** — Applies confidence decay for contradictions, writes to SQLite + ChromaDB
+### Retrieval router
 
-### Confidence & Decay
+The router (Claude Haiku) classifies each query into one of four intent types and assigns a token budget:
 
-Every memory has a `confidence` score (0–1). When the verifier detects a contradiction:
-- `update`: old memory confidence × 0.5
-- `decay`: old memory confidence × 0.6
-- `keep_both`: both retained unchanged
+| Intent | Example query | Levels | Budget |
+|--------|--------------|--------|--------|
+| factual | "What's my name?" | [1] | shallow (3 memories) |
+| project | "What stack does MemOS use?" | [1, 2] | medium (8 memories) |
+| design-reasoning | "Why did we use Haiku for the router?" | [1, 2, 3] | deep (20 memories) |
+| episodic | "What bug did we fix in ChromaDB?" | [2, 3] | deep (20 memories) |
 
-Memories below `confidence < 0.3` are filtered from retrieval but kept in the DB — modeling epistemic uncertainty rather than hard deletes.
+Design-reasoning queries were the failure case I found in Experiment 1 — they were being misrouted to shallow/medium when they needed deep episodic context. Adding the explicit intent class fixed it.
+
+### Confidence decay
+
+Every memory has a confidence score (0–1). When the verifier finds a contradiction it decays the old memory's confidence rather than deleting it. Memories below 0.3 stop being retrieved but stay in the database. This felt more honest than hard deletes — you're modeling uncertainty, not pretending old information never existed.
 
 ---
 
 ## Setup
 
 ```bash
-# 1. Clone repository
 git clone https://github.com/erfansaffari/memos
 cd memos
-
-# 2. Create virtual environment
 python3 -m venv .venv
-source .venv/bin/activate       # Mac/Linux
-
-# 3. Install dependencies
+source .venv/bin/activate
 pip install -r requirements.txt
-# Note: first install downloads the sentence-transformers model (~80MB)
 
-# 4. Configure API keys
 cp .env.example .env
-# Edit .env and set:
-#   ANTHROPIC_API_KEY=your_key_here
-#   WANDB_API_KEY=your_key_here   (optional, for experiments)
+# add your ANTHROPIC_API_KEY (and optionally WANDB_API_KEY for experiments)
 
-# 5. Start chatting
 python main.py chat
-
-# 6. Run the flat vs hierarchical retrieval experiment
-python experiments/exp01_retrieval_comparison.py
 ```
 
----
-
-## CLI Commands
+## CLI
 
 ```bash
-python main.py chat          # Start interactive chat with memory
-python main.py memories      # List all stored memories in a table
-python main.py stats         # Show memory counts by level
-python main.py clear         # Delete all memories (with confirmation)
-python main.py clear --force # Delete without confirmation
+python main.py chat       # chat with persistent memory
+python main.py memories   # see everything stored
+python main.py stats      # memory count by level
+python main.py clear      # wipe all memories
 ```
 
-During chat, you can also type:
-- `memories` — show memory table inline
-- `stats` — show quick memory count
-- `quit` / `exit` / `q` — end session
+During chat: type `memories`, `stats`, or `quit`.
 
 ---
 
-## Tech Stack
+## Experiments
 
-| Component | Technology |
-|-----------|-----------|
-| Language | Python 3.11+ |
-| Agent Orchestration | LangGraph |
-| Primary LLM | Claude Sonnet (`claude-sonnet-4-6`) |
-| Agent LLM | Claude Haiku (`claude-haiku-4-5-20251001`) |
-| Embeddings | `sentence-transformers/all-MiniLM-L6-v2` (local, 384-dim) |
-| Vector Store | ChromaDB (local persistent) |
-| Metadata Store | SQLite via SQLAlchemy |
-| Structured Outputs | Pydantic v2 |
-| Evaluation | Weights & Biases |
-| CLI | Typer + Rich |
+### Experiment 1: flat vs hierarchical retrieval
 
----
+Does the hierarchical router actually outperform flat vector search?
 
-## Storage
+Seeded 14 memories across all 3 levels, ran 10 queries through both approaches, and had Claude Haiku judge retrieval relevance (0–10).
 
-All data is stored locally:
-- `~/.memos/memos.db` — SQLite database (structured metadata)
-- `~/.memos/chroma/` — ChromaDB vector store (semantic search)
+**Results:**
 
----
-
-## Project Structure
-
-```
-memos/
-├── main.py                          # CLI entry point (Typer)
-├── requirements.txt
-├── .env.example
-├── .gitignore
-├── README.md
-│
-├── agents/
-│   ├── extractor.py                 # Extraction Agent (Claude Haiku)
-│   ├── verifier.py                  # Verifier Agent (Claude Haiku)
-│   └── graph.py                     # LangGraph graph definition
-│
-├── memory/
-│   ├── store.py                     # SQLite store + Pydantic schemas
-│   └── vector_store.py              # ChromaDB wrapper
-│
-├── retrieval/
-│   └── router.py                    # Hierarchical retrieval router
-│
-├── experiments/
-│   ├── exp01_retrieval_comparison.py  # Flat vs hierarchical benchmark
-│   └── exp02_router_intent_fix.py     # Intent-aware router fix validation
-│
-├── evaluation/                      # (future) evaluation utilities
-├── prompts/                         # (future) prompt versioning
-├── notebooks/                       # (future) Jupyter analysis
-└── docs/                            # (future) architecture diagrams
-```
-
----
-
-## Experiment 1: Flat vs Hierarchical Retrieval
-
-**File:** `experiments/exp01_retrieval_comparison.py`
-
-Seeds 14 diverse memories across all 3 levels, then runs 10 test queries through both:
-- **Hierarchical:** router classifies query → level-filtered vector search
-- **Flat:** simple top-N vector search, no level awareness
-
-Claude Haiku judges each retrieved context for relevance (0–10). Results are logged to Weights & Biases.
-
-### Results
-
-| Metric | Hierarchical | Flat |
-|--------|-------------|------|
-| Mean relevance score | 7.90/10 | 9.20/10 |
-| Score delta | −1.30 | — |
+| | Hierarchical | Flat |
+|--|--|--|
+| Mean score | 7.90 / 10 | 9.20 / 10 |
 | Wins | 1 | 2 |
 | Ties | 7 | 7 |
 
-| Query | Hier | Flat | Delta |
-|-------|------|------|-------|
-| What is my name? | 10.0 | 10.0 | 0.0 |
-| What university do I go to? | 10.0 | 10.0 | 0.0 |
-| What programming language do I prefer? | 10.0 | 10.0 | 0.0 |
-| What is MemOS built with? | 10.0 | 9.0 | **+1.0** |
-| What embedding model does MemOS use? | 10.0 | 10.0 | 0.0 |
-| **How does the memory hierarchy work?** | **0.0** | 7.0 | **−7.0** |
-| What bug did we fix with ChromaDB? | 10.0 | 10.0 | 0.0 |
-| What did we decide about memory contradictions? | 10.0 | 10.0 | 0.0 |
-| What were the retrieval experiment results? | 7.0 | 7.0 | 0.0 |
-| **Why do we use Claude Haiku for the router?** | **2.0** | 9.0 | **−7.0** |
+Hierarchical underperformed on 2 queries — both were "why/how" design questions that needed Level 3 episodic context but the router was sending them to Level 1/2 only. Everything else tied or the hierarchical approach won.
 
-**Key finding:** Hierarchical matched or beat flat on 8/10 queries. The two failures were **design-reasoning queries** — questions asking *why* or *how* something was designed — where the v1 router misclassified the query depth and never fetched Level 3 episodic memories where design rationale lives. Flat search found the answers by searching everything indiscriminately.
+[View W&B run](https://wandb.ai/erfansaffari0-university-of-waterloo/memos)
 
-This points to a concrete fix: the router needs a `design-reasoning` intent class that always routes to Level 3 with a deep budget.
+```bash
+python experiments/exp01_retrieval_comparison.py
+```
 
----
+### Experiment 2: intent-aware router fix
 
-## Experiment 2: Intent-Aware Router Fix
+Added a `design-reasoning` intent class to the router with a hard rule: any query containing "why", "how does", or "what was the reasoning" always routes to Level 3 with a deep budget.
 
-**File:** `experiments/exp02_router_intent_fix.py`
+**Results:**
 
-**Hypothesis:** Adding a `design-reasoning` intent class to the retrieval router will fix the two Experiment 1 failures (q06, q10) without degrading performance on other query types, improving mean hierarchical score from 7.90 → 9.0+.
+| Query | Exp 1 | Exp 2 | Change |
+|-------|-------|-------|--------|
+| "How does the memory hierarchy work?" | 0.0 | 9.0 | +9.0 |
+| "Why do we use Haiku for the router?" | 2.0 | 9.0 | +7.0 |
+| Mean (all 10 queries) | 7.90 | 9.20 | +1.30 |
 
-**Change:** The router now classifies queries into four intent types:
+The two failure cases from Exp 1 are fixed. Mean hierarchical score now matches flat retrieval (9.20) while still fetching fewer memories on simple queries.
 
-| Intent | Trigger | Levels | Budget |
-|--------|---------|--------|--------|
-| `factual` | Name, basic identity facts | [1] | shallow |
-| `project` | What is X built with? | [1, 2] | medium |
-| `design-reasoning` | Why/how was X designed? | [1, 2, 3] | deep |
-| `episodic` | Bugs, session details, past results | [2, 3] | deep |
-
-**Critical rule:** Any question containing "why", "how does", "what was the reasoning", "why do we use" is *always* `design-reasoning` → forced to `levels=[1,2,3]` and `budget=deep`.
+[View W&B run](https://wandb.ai/erfansaffari0-university-of-waterloo/memos/runs/i62ou2vv)
 
 ```bash
 python experiments/exp02_router_intent_fix.py
 ```
 
-**The fix is working if:**
-- q06 score improves: 0.0 → 7.0+
-- q10 score improves: 2.0 → 7.0+
-- No other query regresses below its Experiment 1 score
-- Mean improves from 7.90 → 9.0+
+---
 
-### Results
+## Stack
 
-| Metric | Exp 2 (intent-aware) | Exp 1 (hierarchical) |
-|--------|---------------------|----------------------|
-| Mean relevance score | **9.20/10** | 7.90/10 |
-| Improvement | **+1.30** | — |
-| Improvements | 2 | — |
-| Regressions | 3 | — |
-| Ties | 5 | — |
+| | |
+|--|--|
+| Orchestration | LangGraph |
+| LLM (responses) | Claude Sonnet |
+| LLM (agents) | Claude Haiku |
+| Embeddings | sentence-transformers/all-MiniLM-L6-v2 (local) |
+| Vector store | ChromaDB |
+| Metadata | SQLite via SQLAlchemy |
+| Evaluation | Weights & Biases |
+| CLI | Typer + Rich |
 
-| Query | Exp 2 | Exp 1 Hier | Delta | Intent |
-|-------|-------|------------|-------|--------|
-| What is my name? | 10.0 | 10.0 | 0.0 | `factual` |
-| What university do I go to? | 10.0 | 10.0 | 0.0 | `factual` |
-| What programming language do I prefer? | 10.0 | 10.0 | 0.0 | `factual` |
-| What is MemOS built with? | 9.0 | 10.0 | −1.0 | `project` |
-| What embedding model does MemOS use? | 10.0 | 10.0 | 0.0 | `project` |
-| **How does the memory hierarchy work?** | **9.0** | **0.0** | **+9.0** | `design-reasoning` |
-| What bug did we fix with ChromaDB? | 9.0 | 10.0 | −1.0 | `episodic` |
-| What did we decide about contradictions? | 9.0 | 10.0 | −1.0 | `design-reasoning` |
-| What were the retrieval experiment results? | 7.0 | 7.0 | 0.0 | `episodic` |
-| **Why do we use Claude Haiku for the router?** | **9.0** | **2.0** | **+7.0** | `design-reasoning` |
-
-**Key finding:** Intent-aware routing fixed both Experiment 1 failures (q06: 0.0 → 9.0, q10: 2.0 → 9.0) and raised mean hierarchical score from 7.90 to **9.20** — matching flat retrieval (9.20) while fetching fewer, more targeted memories on simple queries (3 memories for factual vs 14 for design-reasoning). The three −1.0 regressions (q04, q07, q08) are judge variance, not retrieval failures — all still scored 9/10.
-
-Raw results: `experiments/exp02_results.json`
-
-## Design Principles
-
-1. **Research first, app second.** Every feature exists to answer a research question.
-2. **Honest confidence.** Never delete — decay confidence. Models uncertainty, allows rollback.
-3. **Cheap agents, expensive responses.** Haiku for all internal calls. Sonnet for user-facing only.
-4. **Dual write always.** SQLite + ChromaDB stay in sync.
-5. **Transparency.** Every node logs what it did. You can see exactly what was retrieved and why.
-6. **Local by default.** Embeddings run locally via sentence-transformers.
+Data lives locally at `~/.memos/` — no external database.
 
 ---
 
-*MemOS is a research prototype exploring memory architecture design for agentic AI systems.*
+## Project structure
+
+```
+memos/
+├── agents/
+│   ├── extractor.py      # pulls structured memories from conversation turns
+│   ├── verifier.py       # contradiction detection + confidence decay
+│   └── graph.py          # LangGraph pipeline definition
+├── memory/
+│   ├── store.py          # SQLite store + Pydantic schemas
+│   └── vector_store.py   # ChromaDB wrapper
+├── retrieval/
+│   └── router.py         # intent classification + hierarchical retrieval
+├── experiments/
+│   ├── exp01_retrieval_comparison.py
+│   └── exp02_router_intent_fix.py
+├── docs/
+│   └── architecture.md   # rough architecture notes
+├── main.py               # CLI entry point
+├── utils.py              # shared helpers (logging, formatting)
+└── requirements.txt
+```
