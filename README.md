@@ -77,9 +77,103 @@ python main.py chat       # chat with persistent memory
 python main.py memories   # see everything stored
 python main.py stats      # memory count by level
 python main.py clear      # wipe all memories
+python main.py import --file export.json --platform claude   # import chat history
 ```
 
 During chat: type `memories`, `stats`, or `quit`.
+
+---
+
+## MCP Server
+
+MemOS ships an MCP (Model Context Protocol) server that exposes your memory to any MCP-compatible AI client — Claude Desktop, Cursor, or any other tool that speaks MCP.
+
+### Tools exposed
+
+| Tool | What it does |
+|------|-------------|
+| `memos_recall` | Retrieve memories relevant to a query (query, optional budget) |
+| `memos_remember` | Store a new piece of information (runs extraction + dedup) |
+| `memos_forget` | Zero-out a memory's confidence by ID |
+| `memos_stats` | Return memory counts by level |
+
+### Starting the server
+
+```bash
+python mcp_server.py
+```
+
+The server runs over stdio — your MCP client spawns the process and communicates through stdin/stdout.
+
+### Claude Desktop
+
+Add this to `~/.claude/claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "memos": {
+      "command": "python",
+      "args": ["/absolute/path/to/memos/mcp_server.py"]
+    }
+  }
+}
+```
+
+Restart Claude Desktop. You'll see `memos_recall`, `memos_remember`, `memos_forget`, and `memos_stats` available as tools.
+
+### Cursor
+
+Add this to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "memos": {
+      "command": "python",
+      "args": ["/absolute/path/to/memos/mcp_server.py"]
+    }
+  }
+}
+```
+
+Agents in Cursor can then call `memos_recall` before answering questions about your work.
+
+---
+
+## Importing chat history
+
+If you've been using Claude, ChatGPT, or Gemini and want to seed MemOS with existing conversations, the importer can process exported JSON files and extract memories with deduplication.
+
+### Supported formats
+
+| Platform | How to export |
+|----------|--------------|
+| Claude | claude.ai → Settings → Export Data → download the JSON |
+| ChatGPT | chat.openai.com → Settings → Data Export → conversations.json |
+| Gemini | Google Takeout → Gemini Apps Activity → extract the JSON |
+
+### Running the import
+
+```bash
+# Import a Claude export
+python main.py import --file ~/Downloads/claude_export.json --platform claude
+
+# ChatGPT
+python main.py import --file ~/Downloads/conversations.json --platform chatgpt
+
+# Gemini
+python main.py import --file ~/Downloads/gemini_export.json --platform gemini
+
+# Dry-run: see what would be imported without writing anything
+python main.py import --file export.json --platform claude --dry-run
+```
+
+The importer uses two-layer deduplication:
+1. **SHA-256 hash** — the same file can't be imported twice
+2. **Cosine similarity** — any extracted memory with similarity > 0.92 to an existing one is skipped
+
+Each turn in the export goes through the same extraction + verification pipeline as the live chat, so memory quality is consistent.
 
 ---
 
@@ -155,15 +249,18 @@ memos/
 │   ├── verifier.py       # contradiction detection + confidence decay
 │   └── graph.py          # LangGraph pipeline definition
 ├── memory/
-│   ├── store.py          # SQLite store + Pydantic schemas
+│   ├── store.py          # SQLite store + Pydantic schemas + ImportLog
 │   └── vector_store.py   # ChromaDB wrapper
 ├── retrieval/
 │   └── router.py         # intent classification + hierarchical retrieval
+├── importers/
+│   └── importer.py       # chat history parsers (Claude, ChatGPT, Gemini)
 ├── experiments/
 │   ├── exp01_retrieval_comparison.py
 │   └── exp02_router_intent_fix.py
 ├── docs/
 │   └── architecture.md   # rough architecture notes
+├── mcp_server.py         # MCP server (stdio transport)
 ├── main.py               # CLI entry point
 ├── utils.py              # shared helpers (logging, formatting)
 └── requirements.txt
