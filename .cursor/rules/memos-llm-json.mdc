@@ -1,0 +1,40 @@
+---
+description: Parse LLM JSON responses safely in MemOS agents
+globs: agents/**/*.py,retrieval/**/*.py,experiments/**/*.py,utils.py
+alwaysApply: false
+---
+
+# LLM JSON Parsing
+
+Claude Haiku often wraps JSON in markdown fences even when told not to. **Never call `json.loads()` directly on raw LLM text.**
+
+## Required pattern
+
+```python
+from utils import parse_json
+
+try:
+    data = parse_json(response.content[0].text.strip())
+except (ValueError, KeyError):
+    # return safe fallback — never silently assume success
+    ...
+```
+
+## Applies to
+
+- `retrieval/router.py` — `_route()`
+- `agents/extractor.py` — `extract()`
+- `agents/verifier.py` — `verify()`
+- `experiments/*` — judge/relevance scoring
+
+## Bad vs good
+
+```python
+# ❌ BAD — fails on ```json ... ``` fences, returns empty defaults silently
+data = json.loads(text)
+
+# ✅ GOOD
+data = parse_json(text)
+```
+
+When adding new Haiku/JSON agent calls, always route through `utils.parse_json()`.

@@ -1,0 +1,28 @@
+---
+description: MemOS project conventions and architecture
+alwaysApply: true
+---
+
+# MemOS Core Conventions
+
+MemOS is a CLI-first Python research prototype: hierarchical memory (Identity / Project / Episodic) with LangGraph orchestration, dual-write storage (SQLite + ChromaDB), and intent-aware retrieval.
+
+## Principles
+
+- **Research first** — minimize scope; don't polish unrelated code
+- **Dual write always** — new memories go to both `MemoryStore.save()` and `VectorStore.upsert()`
+- **Cheap agents, expensive responses** — Haiku for router/extractor/verifier; Sonnet for user-facing `respond` only
+- **Never hard-delete memories** — use confidence decay via verifier resolutions (`update` ×0.5, `decay` ×0.6)
+- **Local embeddings** — `all-MiniLM-L6-v2` via sentence-transformers; data at `~/.memos/`
+
+## File layout
+
+- `agents/graph.py` — LangGraph pipeline: retrieve → respond → extract → verify → store
+- `retrieval/router.py` — intent classification + `_fetch()` / `retrieve()` / `classify()`
+- `memory/store.py` — Pydantic models + SQLAlchemy
+- `utils.py` — shared helpers (`parse_json`, dedup, datetime)
+
+## Experiments
+
+- Do **not** modify `experiments/exp01_retrieval_comparison.py` (reproducibility baseline)
+- Exp 2 lives in `experiments/exp02_router_intent_fix.py`
