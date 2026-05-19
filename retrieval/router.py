@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING, Optional
 from anthropic import Anthropic
 
 from memory.store import MemoryItem, MemoryLevel
-from utils import parse_json
+from utils import dedupe_by_content, parse_json
 
 if TYPE_CHECKING:
     from memory.store import MemoryStore
@@ -118,8 +118,17 @@ def format_context(memories: list, budget: str = "medium") -> str:
 
     Used by experiments and graph.py to build the <memory_context> system prompt section.
     """
+    if memories and isinstance(memories[0], MemoryItem):
+        dicts = [
+            {"content": m.content, "level": int(m.level)} for m in memories
+        ]
+    else:
+        dicts = list(memories)
+
+    dicts = dedupe_by_content(dicts)
+
     lines: list[str] = []
-    for m in memories:
+    for m in dicts:
         if isinstance(m, MemoryItem):
             label = LEVEL_LABELS.get(int(m.level), "Memory")
             content = m.content
@@ -244,12 +253,13 @@ class RetrievalRouter:
                     memories.append(rec)
                     seen_ids.add(hit["id"])
 
-        # Always prepend top-3 Level 1 identity memories
-        top_identity = self._store.get_by_level(1, limit=3)
-        for rec in top_identity:
-            if rec.id not in seen_ids:
-                memories.insert(0, rec)
-                seen_ids.add(rec.id)
+        # Only add a single identity anchor if Level 1 was requested but search found nothing
+        if 1 in levels and not any(int(m.level) == 1 for m in memories):
+            top_identity = self._store.get_by_level(1, limit=1)
+            for rec in top_identity:
+                if rec.id not in seen_ids:
+                    memories.insert(0, rec)
+                    seen_ids.add(rec.id)
 
         return memories
 

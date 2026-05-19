@@ -130,6 +130,8 @@ def chat() -> None:
             "new_memories": [],
             "extraction_reasoning": "",
             "conflict_reports": [],
+            "stored_count": 0,
+            "skipped_count": 0,
             "log": [],
         }
 
@@ -141,16 +143,19 @@ def chat() -> None:
         # Transparency footer: what was retrieved and stored
         meta = result.get("retrieval_meta", {})
         n_retrieved = len(result.get("retrieved_memories", []))
-        n_stored = len(result.get("new_memories", []))
+        n_stored = result.get("stored_count", len(result.get("new_memories", [])))
+        n_skipped = result.get("skipped_count", 0)
         conflicts = sum(
             1 for r in result.get("conflict_reports", []) if r.get("has_conflict")
         )
         parts = [
             f"retrieved {n_retrieved} memories",
-            f"levels={meta.get('levels', '?')}",
+            f"intent={meta.get('intent', '?')}",
             f"budget={meta.get('budget', '?')}",
             f"stored {n_stored} new",
         ]
+        if n_skipped:
+            parts.append(f"[dim]skipped {n_skipped} duplicate(s)[/dim]")
         if conflicts:
             parts.append(f"[yellow]{conflicts} conflict(s) resolved[/yellow]")
 

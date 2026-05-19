@@ -25,26 +25,31 @@ from utils import parse_json
 VERIFIER_SYSTEM_PROMPT = """\
 You are a memory verifier agent for MemOS, a hierarchical AI memory system.
 
-Given a NEW memory and a list of EXISTING memories at the same level, detect
-factual contradictions — cases where the new memory directly conflicts with an
-existing one on the same factual claim.
+Given a NEW memory and a list of EXISTING memories at the same level, detect:
+1. Factual contradictions — the new memory directly conflicts with an existing one
+2. Near-duplicates — the new memory restates the same fact as an existing one in different words
 
 What counts as a contradiction:
 - "User uses React" vs "User switched to Svelte" (technology swap)
 - "User is studying at Waterloo" vs "User graduated from Waterloo" (status change)
 - "Project uses SQLite" vs "Project migrated to PostgreSQL" (architecture change)
 
-What does NOT count as a contradiction:
+What counts as a near-duplicate (same fact, different wording):
+- "User is named Erfan" vs "User's name is Erfan"
+- "User prefers Python" vs "User primarily codes in Python"
+- Restating the same skill, name, or preference already captured
+
+What does NOT count as a contradiction or duplicate:
 - Different topics entirely
-- Style or preference differences that can coexist
-- More specific detail about the same fact (not contradictory — just more detail)
+- More specific detail about the same fact (genuinely new information)
 - Temporal statements that can both be historically true
 
 Resolutions:
 - "update":    New memory clearly supersedes old (definitive factual update)
 - "decay":     Old memory becomes less reliable but may still hold partial truth
-- "keep_both": Both statements can be simultaneously valid
-- "none":      No contradiction detected
+- "keep_both": Both statements can be simultaneously valid (different aspects)
+- "duplicate": New memory repeats an existing fact — do NOT store the new one
+- "none":      No conflict or duplicate detected
 
 Respond ONLY with valid JSON — no prose, no markdown:
 {

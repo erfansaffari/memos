@@ -23,7 +23,8 @@ from agents.extractor import ExtractionAgent
 from agents.verifier import VerifierAgent
 from memory.store import ConflictReport, MemoryItem, MemoryLevel, MemoryStore
 from memory.vector_store import VectorStore
-from retrieval.router import BUDGET_MAP, RetrievalRouter
+from retrieval.router import RetrievalRouter, format_context
+from utils import dedupe_by_content, is_near_duplicate_distance
 
 # ---------------------------------------------------------------------------
 # LangGraph State
@@ -39,6 +40,7 @@ You are a helpful AI assistant with persistent long-term memory about this user.
 </memory_context>
 
 Use the memory context above to personalize your response.
+If the context contains relevant facts (skills, background, preferences), use them directly — do not ask the user for information you already have.
 Be natural — do not explicitly say "according to my memory" unless it genuinely adds value.
 If the context is empty or irrelevant, just respond normally.
 """
@@ -54,6 +56,8 @@ class MemOSState(TypedDict):
     new_memories: list       # list[dict] — serialised MemoryItems
     extraction_reasoning: str
     conflict_reports: list   # list[dict] — serialised ConflictReports
+    stored_count: int
+    skipped_count: int
     log: list[str]           # appended by each node for transparency
 
 
@@ -72,7 +76,7 @@ def build_graph(
 
     All agents share the same Anthropic client and storage instances.
     """
-    router = RetrievalRouter(anthropic_client)
+    router = RetrievalRouter(anthropic_client, memory_store, vector_store)
     extractor = ExtractionAgent(anthropic_client)
     verifier = VerifierAgent(anthropic_client)
 
@@ -84,77 +88,29 @@ def build_graph(
         logs = list(state.get("log", []))
         query = state["user_message"]
 
-        # Router classifies the query
-        routing = router.classify(query)
-        levels: list[int] = routing["levels"]
-        budget: str = routing["budget"]
-        n: int = routing["n"]
-        reasoning: str = routing.get("reasoning", "")
+        memories, meta = router.retrieve(query)
+        routing = meta.get("routing", meta)
 
         logs.append(
-            f"[retrieve] routing → levels={levels} budget={budget} n={n} | {reasoning}"
+            f"[retrieve] routing → intent={routing.get('intent', '?')} "
+            f"levels={routing.get('levels', [])} budget={meta.get('budget', '?')} "
+            f"| {routing.get('reasoning', '')}"
         )
 
-        # Always seed with top-3 Level 1 memories (stable identity baseline)
-        level1_memories = memory_store.get_by_level(1)[:3]
-        retrieved_ids: set[str] = {m.id for m in level1_memories}
+        # Deduplicate similar memories so 5x "User is Erfan" don't crowd out skills
+        retrieved_dicts = [_memory_item_to_dict(m) for m in memories]
+        retrieved_dicts = dedupe_by_content(retrieved_dicts)
 
-        # Represent all items uniformly as dicts for state serialisation
-        retrieved: list[dict] = [_memory_item_to_dict(m) for m in level1_memories]
+        context_block = format_context(retrieved_dicts, meta.get("budget", "medium"))
 
-        # Fetch additional levels requested by the router
-        for level in levels:
-            if level == 1:
-                continue  # already fetched above
-            hits = vector_store.search(query, n_results=n, level=level)
-            for hit in hits:
-                if hit["id"] not in retrieved_ids:
-                    retrieved_ids.add(hit["id"])
-                    memory_store.update_frequency(hit["id"])
-                    retrieved.append(
-                        {
-                            "id": hit["id"],
-                            "content": hit["content"],
-                            "level": hit["metadata"].get("level", level),
-                            "summary": hit["metadata"].get("summary", ""),
-                            "importance": hit["metadata"].get("importance", 0.5),
-                            "confidence": hit["metadata"].get("confidence", 1.0),
-                        }
-                    )
+        for item in retrieved_dicts:
+            memory_store.update_frequency(item["id"])
 
-        # For medium/deep budgets, also do a vector search within Level 1
-        if budget != "shallow":
-            hits = vector_store.search(query, n_results=3, level=1)
-            for hit in hits:
-                if hit["id"] not in retrieved_ids:
-                    retrieved_ids.add(hit["id"])
-                    retrieved.append(
-                        {
-                            "id": hit["id"],
-                            "content": hit["content"],
-                            "level": 1,
-                            "summary": hit["metadata"].get("summary", ""),
-                            "importance": hit["metadata"].get("importance", 0.5),
-                            "confidence": hit["metadata"].get("confidence", 1.0),
-                        }
-                    )
-
-        # Build the <memory_context> block injected into the system prompt
-        context_lines: list[str] = []
-        for item in retrieved:
-            level_num = item.get("level", 0)
-            label = LEVEL_LABELS.get(level_num, "Memory")
-            context_lines.append(f"[{label}] {item['content']}")
-
-        context_block = (
-            "\n".join(context_lines) if context_lines else "(no relevant memories found)"
-        )
-
-        logs.append(f"[retrieve] fetched {len(retrieved)} memories into context")
+        logs.append(f"[retrieve] fetched {len(retrieved_dicts)} memories into context")
 
         return {
-            "retrieved_memories": retrieved,
-            "retrieval_meta": routing,
+            "retrieved_memories": retrieved_dicts,
+            "retrieval_meta": {**routing, "budget": meta.get("budget")},
             "context_block": context_block,
             "log": logs,
         }
@@ -262,15 +218,43 @@ def build_graph(
 
         # Persist all newly extracted memories (dual write: SQLite + ChromaDB)
         stored = 0
-        for mem_dict in state.get("new_memories", []):
+        skipped = 0
+        for i, mem_dict in enumerate(state.get("new_memories", [])):
             new_mem = MemoryItem(**mem_dict)
+
+            # Skip near-duplicates detected by vector similarity
+            similar = vector_store.search(
+                new_mem.content,
+                n_results=1,
+                level=int(new_mem.level),
+                min_confidence=0.0,
+            )
+            if similar and is_near_duplicate_distance(similar[0]["distance"]):
+                memory_store.update_frequency(similar[0]["id"])
+                skipped += 1
+                logs.append(
+                    f"[store] skipped duplicate '{new_mem.summary[:40]}' "
+                    f"(matches existing {similar[0]['id'][:8]}…)"
+                )
+                continue
+
+            # Skip if verifier flagged as duplicate of an existing memory
+            if i < len(state.get("conflict_reports", [])):
+                report = ConflictReport(**state["conflict_reports"][i])
+                if report.has_conflict and report.resolution == "duplicate":
+                    skipped += 1
+                    logs.append(
+                        f"[store] skipped duplicate '{new_mem.summary[:40]}' (verifier)"
+                    )
+                    continue
+
             memory_store.save(new_mem)
             vector_store.upsert(new_mem)
             stored += 1
 
-        logs.append(f"[store] wrote {stored} memories to SQLite + ChromaDB")
+        logs.append(f"[store] wrote {stored} memories, skipped {skipped} duplicates")
 
-        return {"log": logs}
+        return {"log": logs, "stored_count": stored, "skipped_count": skipped}
 
     # ------------------------------------------------------------------
     # Assemble the graph

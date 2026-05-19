@@ -27,6 +27,13 @@ memories that would be useful in a FUTURE session — not just context for this 
 Memory levels:
 - Level 1 (Identity): Stable facts about the user — name, role, preferences, skills.
   Extract SPARINGLY. Only truly stable, reusable facts. Example: "User is a CS student at Waterloo."
+  Do NOT re-extract the user's name on every turn — only if newly stated or corrected.
+
+IMPORTANT rules:
+- Only extract NEW information not already obvious from prior context in the turn.
+- Do NOT restate the same fact in different words (e.g. don't store "User is Erfan" if name is already known).
+- If the assistant inferred something the user didn't say, do NOT extract it as a fact.
+- Prefer one comprehensive memory over several fragmented duplicates.
 - Level 2 (Project): Project decisions, architecture choices, tools selected.
   Extract when a clear decision is made. Example: "MemOS uses ChromaDB for vector storage."
 - Level 3 (Episodic): Session-specific details — code snippets, bugs fixed, experiments run, specific outcomes.
