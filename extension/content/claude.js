@@ -106,11 +106,23 @@
   }
 
   // ---------------------------------------------------------------------------
-  // On send: get (or fetch) recall context, tell the interceptor, then
-  // if the interceptor didn't consume it within 2 s fall back to injecting
-  // the context directly into the input box.
+  // Send context to the fetch interceptor SYNCHRONOUSLY.
+  //
+  // window.postMessage is async (next event-loop task) — Claude's fetch fires
+  // before the message is delivered. Instead we write to a DOM attribute and
+  // dispatch a plain Event; DOM events are synchronous so _pendingContext is
+  // set inside the interceptor BEFORE sendBtn.click() runs.
   // ---------------------------------------------------------------------------
-  let _contextSentAt = null;
+
+  function getOrCreateCtxEl() {
+    let el = document.getElementById("__memos_ctx");
+    if (!el) {
+      el = document.createElement("meta");
+      el.id = "__memos_ctx";
+      document.head.appendChild(el);
+    }
+    return el;
+  }
 
   async function prepareContext(input) {
     const userMessage = input.innerText.trim();
@@ -125,36 +137,13 @@
 
       if (recall && recall.context && recall.context.trim()) {
         const ctxBlock = `[context]\n${recall.context}\n[/context]`;
-
-        // Primary: send to fetch interceptor via postMessage (cross-world safe)
-        window.postMessage({ __memos_type: "inject_context", context: ctxBlock }, "*");
-        _contextSentAt = Date.now();
-        console.log("[MemOS] context dispatched to interceptor");
-
-        // Fallback: if interceptor didn't consume within 2 s, inject into input
-        setTimeout(() => {
-          if (_contextSentAt && Date.now() - _contextSentAt >= 1900) {
-            // Interceptor didn't fire — inject into input as fallback
-            const inp = getInputBox();
-            const currentMsg = inp ? inp.innerText.trim() : "";
-            if (inp && currentMsg && !currentMsg.startsWith("[context]")) {
-              console.log("[MemOS] fallback: injecting into input box");
-              setInputContent(inp, `${ctxBlock}\n\n${currentMsg}`);
-            }
-            _contextSentAt = null;
-          }
-        }, 2000);
+        // Write to shared DOM attribute, then dispatch sync event
+        getOrCreateCtxEl().setAttribute("data-ctx", ctxBlock);
+        document.dispatchEvent(new Event("__memos_set_context"));
+        console.log("[MemOS] context dispatched to interceptor (sync)");
       }
     } catch { /* server offline */ }
   }
-
-  // Called by interceptor.js (MAIN world) after successful injection
-  window.addEventListener("message", (e) => {
-    if (e.source !== window) return;
-    if (e.data?.__memos_type === "context_injected") {
-      _contextSentAt = null; // cancel fallback
-    }
-  });
 
   // ---------------------------------------------------------------------------
   // Intercept send button click and Enter key

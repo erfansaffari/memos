@@ -41,7 +41,7 @@
   }
 
   let _cachedQuery = null, _cachedRecall = null, _prefetchTimer = null;
-  let lastUserMessage = "", _contextSentAt = null;
+  let lastUserMessage = "";
 
   function schedulePrefetch() {
     clearTimeout(_prefetchTimer);
@@ -74,6 +74,12 @@
     if (!ok) { input.innerText = text; input.dispatchEvent(new Event("input", { bubbles: true })); }
   }
 
+  function getOrCreateCtxEl() {
+    let el = document.getElementById("__memos_ctx");
+    if (!el) { el = document.createElement("meta"); el.id = "__memos_ctx"; document.head.appendChild(el); }
+    return el;
+  }
+
   async function prepareContext(input) {
     const userMessage = input.innerText.trim();
     if (!userMessage) return;
@@ -84,23 +90,11 @@
       _cachedQuery = userMessage; _cachedRecall = recall;
       if (recall && recall.context && recall.context.trim()) {
         const ctxBlock = `[context]\n${recall.context}\n[/context]`;
-        window.postMessage({ __memos_type: "inject_context", context: ctxBlock }, "*");
-        _contextSentAt = Date.now();
-        setTimeout(() => {
-          if (_contextSentAt && Date.now() - _contextSentAt >= 1900) {
-            const inp = getInputBox();
-            const cur = inp ? inp.innerText.trim() : "";
-            if (inp && cur && !cur.startsWith("[context]")) setInputContent(inp, `${ctxBlock}\n\n${cur}`);
-            _contextSentAt = null;
-          }
-        }, 2000);
+        getOrCreateCtxEl().setAttribute("data-ctx", ctxBlock);
+        document.dispatchEvent(new Event("__memos_set_context"));
       }
     } catch { /* */ }
   }
-
-  window.addEventListener("message", (e) => {
-    if (e.source === window && e.data?.__memos_type === "context_injected") _contextSentAt = null;
-  });
 
   let _bypassClick = false, _bypassEnter = false;
 
