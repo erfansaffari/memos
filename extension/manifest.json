@@ -19,6 +19,16 @@
   },
   "content_scripts": [
     {
+      "matches": [
+        "https://claude.ai/*",
+        "https://chatgpt.com/*",
+        "https://gemini.google.com/*"
+      ],
+      "js": ["shared/interceptor.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
       "matches": ["https://claude.ai/*"],
       "js": ["shared/api.js", "content/claude.js"],
       "run_at": "document_idle"
