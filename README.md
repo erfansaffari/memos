@@ -84,6 +84,50 @@ During chat: type `memories`, `stats`, or `quit`.
 
 ---
 
+## Chrome Extension
+
+The extension makes MemOS work automatically in Claude.ai, ChatGPT, and Gemini — no CLI needed during conversations.
+
+**Step 1 — Start the local server**
+
+```bash
+python main.py server
+```
+
+**Step 2 — Load the extension in Chrome**
+
+1. Go to `chrome://extensions`
+2. Enable **Developer Mode** (top right toggle)
+3. Click **Load unpacked**
+4. Select the `extension/` folder from this repo
+
+The extension icon shows a **green dot** when the server is running and a **red dot** when it's offline. When offline, the extension does nothing — your AI tools work completely normally.
+
+**How it works**
+
+- When you send a message, the extension fetches relevant memories from your local MemOS server and silently prepends them to the message before it reaches the AI
+- When the AI finishes responding, the extension extracts new memories from the turn and stores them in the background
+- You never see any of this — it just works
+
+**Supported platforms**
+
+| Platform | URL |
+|----------|-----|
+| Claude | claude.ai |
+| ChatGPT | chatgpt.com |
+| Gemini | gemini.google.com |
+
+**When selectors break**
+
+Platforms update their UI and DOM selectors will eventually break. When the extension stops working on a platform:
+
+1. Open DevTools on that platform (F12)
+2. Use the Inspector to find the new input/button selector
+3. Update the selector constant at the top of `extension/content/<platform>.js`
+4. Reload the extension in `chrome://extensions`
+
+---
+
 ## MCP Server
 
 MemOS ships an MCP (Model Context Protocol) server that exposes your memory to any MCP-compatible AI client — Claude Desktop, Cursor, or any other tool that speaks MCP.
@@ -255,6 +299,21 @@ memos/
 │   └── router.py         # intent classification + hierarchical retrieval
 ├── importers/
 │   └── importer.py       # chat history parsers (Claude, ChatGPT, Gemini)
+├── server/               # FastAPI local server for Chrome extension
+│   ├── app.py
+│   └── models.py
+├── extension/            # Chrome extension
+│   ├── manifest.json
+│   ├── background.js     # service worker — polls /health every 30 s
+│   ├── content/
+│   │   ├── claude.js     # content script for claude.ai
+│   │   ├── chatgpt.js    # content script for chatgpt.com
+│   │   └── gemini.js     # content script for gemini.google.com
+│   ├── shared/
+│   │   └── api.js        # shared fetch helpers (fail-silent)
+│   └── popup/
+│       ├── popup.html    # status dot + memory count
+│       └── popup.js
 ├── experiments/
 │   ├── exp01_retrieval_comparison.py
 │   └── exp02_router_intent_fix.py
