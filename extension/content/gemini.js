@@ -1,0 +1,137 @@
+// content/gemini.js — MemOS memory injection for gemini.google.com
+//
+// DOM selectors (correct as of May 2026 — update here if Gemini changes its UI):
+//   INPUT_SELECTOR  — the contenteditable Quill editor input
+//   SEND_SELECTOR   — the send button
+//   RESPONSE_SELECTOR — each model response container
+//
+// To update selectors: open DevTools on gemini.google.com → Inspector → find the element.
+
+(function () {
+  "use strict";
+
+  const PLATFORM = "gemini";
+
+  // ----- Selectors -----
+  // Update these if Gemini changes its UI.
+  const INPUT_SELECTOR = 'div.ql-editor[contenteditable="true"]';
+  const SEND_SELECTOR = "button.send-button";
+  const RESPONSE_SELECTOR = "model-response";
+
+  let lastUserMessage = "";
+  let isProcessing = false;
+
+  // ---------------------------------------------------------------------------
+  // Step 1 — Intercept send
+  // ---------------------------------------------------------------------------
+
+  function getInputBox() {
+    return document.querySelector(INPUT_SELECTOR);
+  }
+
+  function getSendButton() {
+    return document.querySelector(SEND_SELECTOR);
+  }
+
+  async function handleSend() {
+    if (isProcessing) return;
+    const input = getInputBox();
+    if (!input) return;
+
+    const userMessage = input.innerText.trim();
+    if (!userMessage) return;
+
+    isProcessing = true;
+    lastUserMessage = userMessage;
+
+    try {
+      const recall = await memosRecall(userMessage, PLATFORM);
+
+      if (recall && recall.context && recall.context.trim().length > 0) {
+        const withContext =
+          `[context]\n${recall.context}\n[/context]\n\n${userMessage}`;
+        input.innerText = withContext;
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } catch {
+      // fail silently
+    }
+
+    isProcessing = false;
+  }
+
+  document.addEventListener(
+    "click",
+    (e) => {
+      const sendBtn = getSendButton();
+      if (sendBtn && (sendBtn === e.target || sendBtn.contains(e.target))) {
+        handleSend();
+      }
+    },
+    true
+  );
+
+  document.addEventListener(
+    "keydown",
+    (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        const input = getInputBox();
+        if (input && document.activeElement === input) {
+          handleSend();
+        }
+      }
+    },
+    true
+  );
+
+  // ---------------------------------------------------------------------------
+  // Step 2 — Wait for AI response to finish streaming
+  // ---------------------------------------------------------------------------
+
+  function waitForResponseToFinish(container, callback) {
+    let debounceTimer = null;
+    const observer = new MutationObserver(() => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        observer.disconnect();
+        callback();
+      }, 1500);
+    });
+
+    observer.observe(container, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Step 3 — Watch for new model responses and store them
+  // ---------------------------------------------------------------------------
+
+  const pageObserver = new MutationObserver(() => {
+    try {
+      const responses = document.querySelectorAll(RESPONSE_SELECTOR);
+      const lastResponse = responses[responses.length - 1];
+      if (!lastResponse || lastResponse.dataset.memosProcessed) return;
+
+      lastResponse.dataset.memosProcessed = "true";
+
+      waitForResponseToFinish(lastResponse, () => {
+        try {
+          const assistantText = lastResponse.innerText.trim();
+          if (assistantText && lastUserMessage) {
+            memosRemember(lastUserMessage, assistantText, PLATFORM);
+            lastUserMessage = "";
+          }
+        } catch {
+          // fail silently
+        }
+      });
+    } catch {
+      // fail silently
+    }
+  });
+
+  pageObserver.observe(document.body, { childList: true, subtree: true });
+})();
