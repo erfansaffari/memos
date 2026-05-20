@@ -100,11 +100,24 @@ app.add_middleware(
 # stack and always carries Access-Control-Allow-Origin.
 # ---------------------------------------------------------------------------
 
+_CORS_HEADERS = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+}
+
+
 @app.exception_handler(Exception)
 async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    # Starlette's CORSMiddleware has a known gap: if an unhandled exception
+    # propagates through certain code paths the CORS response-wrapper is not
+    # called, so the browser gets a 500 with no Access-Control-Allow-Origin and
+    # reports a CORS error on top of the server error.  Passing headers directly
+    # to JSONResponse is the only path that is guaranteed to work.
     return JSONResponse(
         status_code=500,
         content={"detail": f"{type(exc).__name__}: {exc}"},
+        headers=_CORS_HEADERS,
     )
 
 
@@ -116,8 +129,11 @@ async def _global_exception_handler(request: Request, exc: Exception) -> JSONRes
 @app.get("/health")
 async def health():
     """Extension polls this every 30 s to show the green/red status dot."""
-    stats = _store.stats()
-    return {"status": "ok", "memories": stats["total"]}
+    try:
+        s = _store.stats()
+        return {"status": "ok", "memories": s["total"]}
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"status": "error", "detail": str(exc)}, headers=_CORS_HEADERS)
 
 
 @app.post("/recall", response_model=RecallResponse)
@@ -126,14 +142,17 @@ async def recall(req: RecallRequest):
     Return relevant memory context for a user query.
     Called by the extension before the user's message is sent.
     """
-    memories, meta = _router.retrieve(req.query)
-    context = format_context(memories, meta.get("budget", req.budget))
-    return RecallResponse(
-        context=context,
-        memory_count=len(memories),
-        levels_used=meta.get("levels_used", []),
-        budget=meta.get("budget", req.budget),
-    )
+    try:
+        memories, meta = _router.retrieve(req.query)
+        context = format_context(memories, meta.get("budget", req.budget))
+        return RecallResponse(
+            context=context,
+            memory_count=len(memories),
+            levels_used=meta.get("levels_used", []),
+            budget=meta.get("budget", req.budget),
+        )
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)}, headers=_CORS_HEADERS)
 
 
 @app.post("/remember", response_model=RememberResponse)
@@ -142,44 +161,48 @@ async def remember(req: RememberRequest):
     Extract and store memories from a completed conversation turn.
     Called by the extension after the AI response finishes rendering.
     """
-    result = _extractor.extract(req.user_message, req.assistant_response)
-    stored = 0
-    skipped = 0
+    try:
+        result = _extractor.extract(req.user_message, req.assistant_response)
+        stored = 0
+        skipped = 0
 
-    for mem in result.memories:
-        # Verifier: check for contradictions against existing memories at same level
-        existing = _store.get_by_level(int(mem.level), limit=20)
-        report = _verifier.verify(mem, existing)
+        for mem in result.memories:
+            existing = _store.get_by_level(int(mem.level), limit=20)
+            report = _verifier.verify(mem, existing)
 
-        if report.has_conflict and report.resolution == "duplicate":
-            skipped += 1
-            continue
+            if report.has_conflict and report.resolution == "duplicate":
+                skipped += 1
+                continue
 
-        if report.has_conflict and report.old_memory_id:
-            decay_factors = {"update": 0.5, "decay": 0.6}
-            factor = decay_factors.get(report.resolution)
-            if factor:
-                _store.decay_confidence(report.old_memory_id, factor)
+            if report.has_conflict and report.old_memory_id:
+                decay_factors = {"update": 0.5, "decay": 0.6}
+                factor = decay_factors.get(report.resolution)
+                if factor:
+                    _store.decay_confidence(report.old_memory_id, factor)
 
-        # Dedup: skip if a near-identical vector already exists (cosine distance < 0.08)
-        similar = _vector_store.query(mem.content, n_results=1, min_confidence=0.0)
-        if similar and similar[0]["distance"] < 0.08:
-            skipped += 1
-            continue
+            similar = _vector_store.query(mem.content, n_results=1, min_confidence=0.0)
+            if similar and similar[0]["distance"] < 0.08:
+                skipped += 1
+                continue
 
-        _store.upsert(mem)
-        _vector_store.upsert(mem)
-        stored += 1
+            _store.upsert(mem)
+            _vector_store.upsert(mem)
+            stored += 1
 
-    return RememberResponse(
-        memories_stored=stored,
-        memories_skipped=skipped,
-        reasoning=result.reasoning,
-    )
+        return RememberResponse(
+            memories_stored=stored,
+            memories_skipped=skipped,
+            reasoning=result.reasoning,
+        )
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)}, headers=_CORS_HEADERS)
 
 
 @app.get("/stats", response_model=StatsResponse)
 async def stats():
     """Return memory counts by level."""
-    s = _store.stats()
-    return StatsResponse(total=s["total"], by_level=s["by_level"])
+    try:
+        s = _store.stats()
+        return StatsResponse(total=s["total"], by_level=s["by_level"])
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"detail": str(exc)}, headers=_CORS_HEADERS)
