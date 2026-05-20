@@ -1,6 +1,12 @@
 // content/gemini.js — MemOS memory injection for gemini.google.com
-// See content/claude.js for full architecture notes.
+// See content/claude.js for architecture notes.
 // Update selectors: gemini.google.com → F12 → Inspector.
+//
+// IMPORTANT: Gemini's web app uses an internal Google endpoint (not the public
+// generativelanguage.googleapis.com) with a non-JSON body format (protobuf-JSON
+// or form-encoded). The fetch interceptor cannot reliably parse this body, so we
+// use DIRECT INPUT MODIFICATION instead. A MutationObserver immediately strips
+// the [context] block from the rendered user bubble so it stays invisible.
 
 (function () {
   "use strict";
@@ -22,12 +28,14 @@
   const RESPONSE_SELECTORS = [
     "model-response",
     ".model-response-text",
+    ".response-container",
     '[data-message-author-role="assistant"]',
   ];
   const USER_MSG_SELECTORS = [
     ".user-query-text",
-    '[data-message-author-role="user"]',
+    ".user-query-text-container",
     ".human-turn",
+    '[data-message-author-role="user"]',
   ];
 
   function getInputBox() {
@@ -43,6 +51,9 @@
     return null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Prefetch while typing (150ms debounce)
+  // ---------------------------------------------------------------------------
   let _cachedQuery = null, _cachedRecall = null, _prefetchTimer = null;
   let lastUserMessage = "";
 
@@ -57,7 +68,7 @@
         const r = await memosRecall(q, PLATFORM);
         _cachedQuery = q; _cachedRecall = r;
       } catch { /* server offline */ }
-    }, 300);
+    }, 150);
   }
 
   function attachInputListener() {
@@ -67,22 +78,29 @@
     input.addEventListener("input", schedulePrefetch);
   }
 
+  // ---------------------------------------------------------------------------
+  // Input content injection (Quill editor compatible via execCommand)
+  // ---------------------------------------------------------------------------
   function setInputContent(input, text) {
     input.focus();
     const sel = window.getSelection();
     const range = document.createRange();
     range.selectNodeContents(input);
-    sel.removeAllRanges(); sel.addRange(range);
+    sel.removeAllRanges();
+    sel.addRange(range);
     const ok = document.execCommand("insertText", false, text);
-    if (!ok) { input.innerText = text; input.dispatchEvent(new Event("input", { bubbles: true })); }
+    if (!ok) {
+      input.innerText = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
   }
 
-  function getOrCreateCtxEl() {
-    let el = document.getElementById("__memos_ctx");
-    if (!el) { el = document.createElement("meta"); el.id = "__memos_ctx"; document.head.appendChild(el); }
-    return el;
-  }
-
+  // ---------------------------------------------------------------------------
+  // prepareContext — inject context directly into the Quill input box.
+  // Gemini's internal API uses a non-JSON body format, so fetch interception
+  // is not viable. We prepend a [context] block, send the message, then strip
+  // it from the rendered user bubble via cleanUserMessages().
+  // ---------------------------------------------------------------------------
   async function prepareContext(input) {
     const userMessage = input.innerText.trim();
     if (!userMessage) return;
@@ -93,38 +111,60 @@
       _cachedQuery = userMessage; _cachedRecall = recall;
       if (recall && recall.context && recall.context.trim()) {
         const ctxBlock = `[context]\n${recall.context}\n[/context]`;
-        getOrCreateCtxEl().setAttribute("data-ctx", ctxBlock);
-        document.dispatchEvent(new Event("__memos_set_context"));
+        setInputContent(input, `${ctxBlock}\n\n${userMessage}`);
       }
-    } catch { /* */ }
+    } catch { /* server offline */ }
   }
 
-  let _bypassClick = false, _bypassEnter = false;
+  // ---------------------------------------------------------------------------
+  // Send interception — block the original event, inject context, re-send
+  //
+  // For BOTH click and Enter: always trigger the final send via sendBtn.click().
+  // Gemini also ignores synthetic keyboard events in some builds, so we avoid
+  // re-firing KeyboardEvents entirely.
+  // ---------------------------------------------------------------------------
+  let _bypassClick = false;
 
+  async function handleSend(e) {
+    if (_bypassClick) return;
+    const input = getInputBox();
+    if (!input || !input.innerText.trim()) return;
+
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    attachInputListener();
+
+    await prepareContext(input);
+
+    const sendBtn = getSendButton();
+    if (sendBtn) {
+      _bypassClick = true;
+      sendBtn.click();
+      _bypassClick = false;
+    }
+  }
+
+  // Click on send button
   document.addEventListener("click", async (e) => {
     if (_bypassClick) return;
     const sendBtn = getSendButton();
     if (!sendBtn || (sendBtn !== e.target && !sendBtn.contains(e.target))) return;
-    const input = getInputBox();
-    if (!input || !input.innerText.trim()) return;
-    e.preventDefault(); e.stopImmediatePropagation(); attachInputListener();
-    await prepareContext(input);
-    _bypassClick = true; sendBtn.click(); _bypassClick = false;
+    await handleSend(e);
   }, true);
 
+  // Enter key (Gemini's Quill editor submits on plain Enter, not Ctrl+Enter)
   document.addEventListener("keydown", async (e) => {
-    if (e.key !== "Enter" || e.shiftKey || _bypassEnter) return;
+    if (e.key !== "Enter" || e.shiftKey) return;
     const input = getInputBox();
     if (!input) return;
     if (!input.contains(document.activeElement) && document.activeElement !== input) return;
     if (!input.innerText.trim()) return;
-    e.preventDefault(); e.stopImmediatePropagation();
-    await prepareContext(input);
-    _bypassEnter = true;
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    _bypassEnter = false;
+    await handleSend(e);
   }, true);
 
+  // ---------------------------------------------------------------------------
+  // DOM cleanup: remove [context] block from rendered user message bubbles
+  // ---------------------------------------------------------------------------
   function cleanUserMessages() {
     for (const sel of USER_MSG_SELECTORS) {
       document.querySelectorAll(sel).forEach((msg) => {
@@ -135,9 +175,15 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Response observer — store memories after AI finishes responding
+  // ---------------------------------------------------------------------------
   function waitForStreamEnd(container, callback) {
     let timer = null;
-    const obs = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500); });
+    const obs = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500);
+    });
     obs.observe(container, { childList: true, subtree: true, characterData: true });
     timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500);
   }
@@ -149,7 +195,10 @@
       if (!last || last.dataset.memosProcessed) return;
       last.dataset.memosProcessed = "true";
       waitForStreamEnd(last, () => {
-        try { const t = last.innerText.trim(); if (t && lastUserMessage) { memosRemember(lastUserMessage, t, PLATFORM); lastUserMessage = ""; } } catch { /* */ }
+        try {
+          const t = last.innerText.trim();
+          if (t && lastUserMessage) { memosRemember(lastUserMessage, t, PLATFORM); lastUserMessage = ""; }
+        } catch { /* */ }
       });
     } catch { /* */ }
   });

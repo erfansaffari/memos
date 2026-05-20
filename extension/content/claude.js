@@ -78,7 +78,7 @@
         _cachedRecall = r;
         console.log("[MemOS] prefetched context for query:", q.slice(0, 40));
       } catch { /* server offline */ }
-    }, 300);
+    }, 150);
   }
 
   function attachInputListener() {

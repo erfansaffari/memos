@@ -1,12 +1,17 @@
 // content/chatgpt.js — MemOS memory injection for chatgpt.com
-// See content/claude.js for full architecture notes.
+// See content/claude.js for architecture notes.
 // Update selectors: chatgpt.com → F12 → Inspector.
+//
+// NOTE: ChatGPT checks event.isTrusted on keyboard events and ignores synthetic
+// ones. We never re-fire a KeyboardEvent. Instead we always trigger send by
+// clicking the send button programmatically — sendBtn.click() is trusted enough.
 
 (function () {
   "use strict";
 
   const PLATFORM = "chatgpt";
 
+  // ----- Selectors (May 2026) — update if ChatGPT changes its UI -----
   const INPUT_SELECTORS = [
     'div#prompt-textarea[contenteditable="true"]',
     'div[contenteditable="true"][id="prompt-textarea"]',
@@ -40,6 +45,9 @@
     return null;
   }
 
+  // ---------------------------------------------------------------------------
+  // Prefetch while typing (150ms debounce)
+  // ---------------------------------------------------------------------------
   let _cachedQuery = null, _cachedRecall = null, _prefetchTimer = null;
   let lastUserMessage = "";
 
@@ -54,7 +62,7 @@
         const r = await memosRecall(q, PLATFORM);
         _cachedQuery = q; _cachedRecall = r;
       } catch { /* server offline */ }
-    }, 300);
+    }, 150);
   }
 
   function attachInputListener() {
@@ -64,16 +72,9 @@
     input.addEventListener("input", schedulePrefetch);
   }
 
-  function setInputContent(input, text) {
-    input.focus();
-    const sel = window.getSelection();
-    const range = document.createRange();
-    range.selectNodeContents(input);
-    sel.removeAllRanges(); sel.addRange(range);
-    const ok = document.execCommand("insertText", false, text);
-    if (!ok) { input.innerText = text; input.dispatchEvent(new Event("input", { bubbles: true })); }
-  }
-
+  // ---------------------------------------------------------------------------
+  // Sync context dispatch to fetch interceptor via DOM attribute + Event
+  // ---------------------------------------------------------------------------
   function getOrCreateCtxEl() {
     let el = document.getElementById("__memos_ctx");
     if (!el) { el = document.createElement("meta"); el.id = "__memos_ctx"; document.head.appendChild(el); }
@@ -91,37 +92,61 @@
       if (recall && recall.context && recall.context.trim()) {
         const ctxBlock = `[context]\n${recall.context}\n[/context]`;
         getOrCreateCtxEl().setAttribute("data-ctx", ctxBlock);
-        document.dispatchEvent(new Event("__memos_set_context"));
+        document.dispatchEvent(new Event("__memos_set_context")); // sync
       }
-    } catch { /* */ }
+    } catch { /* server offline */ }
   }
 
-  let _bypassClick = false, _bypassEnter = false;
+  // ---------------------------------------------------------------------------
+  // Send interception
+  //
+  // For BOTH click and Enter: prevent the original event, await prepareContext,
+  // then trigger send via sendBtn.click() (not a synthetic KeyboardEvent — ChatGPT
+  // checks isTrusted on keyboard events and ignores programmatic ones).
+  // ---------------------------------------------------------------------------
+  let _bypassClick = false;
 
+  async function handleSend(e) {
+    if (_bypassClick) return;
+    const input = getInputBox();
+    if (!input || !input.innerText.trim()) return;
+
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    attachInputListener();
+
+    await prepareContext(input);
+
+    const sendBtn = getSendButton();
+    if (sendBtn) {
+      _bypassClick = true;
+      sendBtn.click();
+      _bypassClick = false;
+    }
+  }
+
+  // Click on send button
   document.addEventListener("click", async (e) => {
     if (_bypassClick) return;
     const sendBtn = getSendButton();
     if (!sendBtn || (sendBtn !== e.target && !sendBtn.contains(e.target))) return;
-    const input = getInputBox();
-    if (!input || !input.innerText.trim()) return;
-    e.preventDefault(); e.stopImmediatePropagation(); attachInputListener();
-    await prepareContext(input);
-    _bypassClick = true; sendBtn.click(); _bypassClick = false;
+    await handleSend(e);
   }, true);
 
+  // Enter key in input box → use sendBtn.click() to send (not re-fire Enter)
   document.addEventListener("keydown", async (e) => {
-    if (e.key !== "Enter" || e.shiftKey || _bypassEnter) return;
+    if (e.key !== "Enter" || e.shiftKey) return;
     const input = getInputBox();
     if (!input) return;
     if (!input.contains(document.activeElement) && document.activeElement !== input) return;
     if (!input.innerText.trim()) return;
-    e.preventDefault(); e.stopImmediatePropagation();
-    await prepareContext(input);
-    _bypassEnter = true;
-    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
-    _bypassEnter = false;
+    await handleSend(e);
   }, true);
 
+  // ---------------------------------------------------------------------------
+  // DOM cleanup: remove [context] block from rendered user message bubbles
+  // (in case fetch injection replays context in the chat history)
+  // ---------------------------------------------------------------------------
   function cleanUserMessages() {
     for (const sel of USER_MSG_SELECTORS) {
       document.querySelectorAll(sel).forEach((msg) => {
@@ -132,9 +157,15 @@
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Response observer — store memories after AI finishes responding
+  // ---------------------------------------------------------------------------
   function waitForStreamEnd(container, callback) {
     let timer = null;
-    const obs = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500); });
+    const obs = new MutationObserver(() => {
+      clearTimeout(timer);
+      timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500);
+    });
     obs.observe(container, { childList: true, subtree: true, characterData: true });
     timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500);
   }
@@ -146,7 +177,10 @@
       if (!last || last.dataset.memosProcessed) return;
       last.dataset.memosProcessed = "true";
       waitForStreamEnd(last, () => {
-        try { const t = last.innerText.trim(); if (t && lastUserMessage) { memosRemember(lastUserMessage, t, PLATFORM); lastUserMessage = ""; } } catch { /* */ }
+        try {
+          const t = last.innerText.trim();
+          if (t && lastUserMessage) { memosRemember(lastUserMessage, t, PLATFORM); lastUserMessage = ""; }
+        } catch { /* */ }
       });
     } catch { /* */ }
   });
