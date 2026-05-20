@@ -7,6 +7,7 @@ Commands:
     stats     — Show memory counts by level
     clear     — Delete all memories (with optional --force)
     import    — Import chat history from Claude, ChatGPT, or Gemini exports
+    server    — Start the local FastAPI server for the Chrome extension
 
 During a chat session, you can also type:
     memories  — show memory table inline
@@ -195,6 +196,25 @@ def clear(
     count = memory_store.delete_all()
     vector_store.delete_all()
     console.print(f"[bold red]Deleted {count} memories from SQLite and ChromaDB.[/bold red]")
+
+
+@app.command()
+def server(
+    port: int = typer.Option(8765, "--port", help="Port to run the server on."),
+    reload: bool = typer.Option(False, "--reload", help="Auto-reload on code changes."),
+) -> None:
+    """Start the local MemOS server for the Chrome extension."""
+    import uvicorn
+
+    console.print(
+        Panel(
+            f"[bold cyan]MemOS Server[/bold cyan]\n"
+            f"[dim]Listening on [bold]http://127.0.0.1:{port}[/bold][/dim]\n"
+            f"[dim]Chrome extension connects here. Press Ctrl+C to stop.[/dim]",
+            border_style="cyan",
+        )
+    )
+    uvicorn.run("server.app:app", host="127.0.0.1", port=port, reload=reload)
 
 
 @app.command(name="import")
