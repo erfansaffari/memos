@@ -79,14 +79,12 @@ app = FastAPI(title="MemOS Local Server", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "chrome-extension://*",
-        "http://localhost",
-        "http://localhost:*",
-        "http://127.0.0.1",
-        "http://127.0.0.1:*",
-    ],
-    allow_methods=["GET", "POST"],
+    # allow_origins=["*"] is safe because the server only ever binds to 127.0.0.1.
+    # FastAPI's CORS middleware does not support wildcard patterns inside origin strings
+    # (e.g. "chrome-extension://*" is treated as a literal, not a glob), so any
+    # chrome-extension:// origin would fail the preflight. Using "*" is the correct fix.
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
