@@ -76,19 +76,37 @@
           console.log("[MemOS interceptor] injected into prompt (legacy)");
         }
 
-        // ── OpenAI / Claude messages: { messages: [{role, content}] } ──
+        // ── OpenAI / Claude messages: { messages: [{role, content}] }
+        // ── ChatGPT web:              { messages: [{author:{role}, content:{content_type, parts}}] }
         else if (Array.isArray(body.messages)) {
           for (let i = body.messages.length - 1; i >= 0; i--) {
             const msg = body.messages[i];
-            if (msg.role === "user" || msg.role === "human") {
-              if (typeof msg.content === "string") {
-                msg.content = ctx + "\n\n" + msg.content;
-              } else if (Array.isArray(msg.content)) {
-                const tp = msg.content.find((p) => p.type === "text");
-                if (tp) tp.text = ctx + "\n\n" + tp.text;
-                else msg.content.unshift({ type: "text", text: ctx });
-              }
+            // Standard OpenAI: msg.role  |  ChatGPT web: msg.author.role
+            const role = msg.role ?? msg.author?.role;
+            if (role !== "user" && role !== "human") continue;
+
+            if (typeof msg.content === "string") {
+              // Standard OpenAI string content
+              msg.content = ctx + "\n\n" + msg.content;
               injected = true;
+            } else if (Array.isArray(msg.content)) {
+              // OpenAI vision: [{type:"text", text:"..."}, ...]
+              const tp = msg.content.find((p) => p.type === "text");
+              if (tp) tp.text = ctx + "\n\n" + tp.text;
+              else msg.content.unshift({ type: "text", text: ctx });
+              injected = true;
+            } else if (
+              msg.content && typeof msg.content === "object" &&
+              Array.isArray(msg.content.parts)
+            ) {
+              // ChatGPT web: content = {content_type:"text", parts:["Hello"]}
+              if (typeof msg.content.parts[0] === "string") {
+                msg.content.parts[0] = ctx + "\n\n" + msg.content.parts[0];
+                injected = true;
+              }
+            }
+
+            if (injected) {
               console.log("[MemOS interceptor] injected into messages[]");
               break;
             }

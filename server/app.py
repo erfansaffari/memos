@@ -17,8 +17,9 @@ from contextlib import asynccontextmanager
 
 import anthropic
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from memory.store import MemoryStore
 from memory.vector_store import VectorStore
@@ -87,6 +88,24 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+# ---------------------------------------------------------------------------
+# Global exception handler
+#
+# When FastAPI raises an unhandled exception its default 500 response bypasses
+# the CORSMiddleware response wrapper, so CORS headers are absent and the
+# browser reports both a CORS error and a 500. Registering a handler here
+# ensures all errors return a JSONResponse that travels through the middleware
+# stack and always carries Access-Control-Allow-Origin.
+# ---------------------------------------------------------------------------
+
+@app.exception_handler(Exception)
+async def _global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"{type(exc).__name__}: {exc}"},
+    )
 
 
 # ---------------------------------------------------------------------------
