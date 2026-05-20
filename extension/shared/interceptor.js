@@ -1,25 +1,25 @@
-// shared/interceptor.js
-// Runs in the PAGE's main JavaScript world (see manifest.json world: "MAIN").
-// Overrides window.fetch so context can be injected at the network level —
-// the user's visible input is never touched and the context never appears
-// in the conversation history UI.
+// shared/interceptor.js — runs in the PAGE's MAIN JavaScript world
+// (declared in manifest.json with world:"MAIN", run_at:"document_start")
 //
-// Communication: content scripts dispatch a "__memos_inject_context" CustomEvent
-// on `document` with the context string as `detail`. This script listens for it
-// and injects the context into the very next matching AI API request.
-//
-// If the request body can't be parsed (non-JSON, unexpected format), the request
-// is forwarded unchanged — fail silently, never break the platform.
+// Overrides window.fetch to inject MemOS context into AI API requests.
+// Receives context from the isolated-world content scripts via window.postMessage.
+// CustomEvent.detail does NOT reliably cross the isolated→MAIN world boundary,
+// so we use postMessage (structured-clone, guaranteed to work).
 
 (function () {
   "use strict";
 
   let _pendingContext = null;
 
-  // Receive context from the isolated-world content script
-  document.addEventListener("__memos_inject_context", (e) => {
-    _pendingContext = e.detail || null;
+  // Receive context from isolated-world content script
+  window.addEventListener("message", (e) => {
+    if (e.source !== window) return;
+    if (!e.data || e.data.__memos_type !== "inject_context") return;
+    _pendingContext = e.data.context || null;
+    console.log("[MemOS interceptor] context ready, length:", _pendingContext?.length);
   });
+
+  console.log("[MemOS interceptor] fetch override installed");
 
   const _originalFetch = window.fetch.bind(window);
 
@@ -31,90 +31,81 @@
         ? resource.url
         : "";
 
-    // Only attempt injection on POST requests that look like AI API calls
+    // Match AI conversation POST requests broadly by domain
     const isAiCall =
-      (url.includes("claude.ai") &&
-        (url.includes("/completion") ||
-          url.includes("/messages") ||
-          url.includes("/append_message"))) ||
+      (url.includes("claude.ai") && init?.method === "POST") ||
       (url.includes("chatgpt.com") && url.includes("/conversation")) ||
-      url.includes("generativelanguage.googleapis.com");
+      (url.includes("generativelanguage.googleapis.com") && init?.method === "POST");
 
-    if (_pendingContext && isAiCall && init?.method === "POST" && init?.body) {
+    if (_pendingContext && isAiCall && init?.body) {
       const ctx = _pendingContext;
-      _pendingContext = null; // consume immediately so we don't double-inject
+      _pendingContext = null;
+
+      console.log("[MemOS interceptor] intercepting:", url.split("?")[0]);
 
       try {
-        const body = JSON.parse(init.body);
+        const bodyStr = typeof init.body === "string" ? init.body : null;
+        if (!bodyStr) throw new Error("body is not a string");
+
+        const body = JSON.parse(bodyStr);
         let injected = false;
 
-        // ── Claude format: { prompt: "...\n\nHuman: <msg>\n\nAssistant:" } ──
+        // Claude format 1: { prompt: "...Human: <msg>..." }
         if (typeof body.prompt === "string" && body.prompt.trim()) {
-          // Insert context right before the last Human: turn
           const humanIdx = body.prompt.lastIndexOf("\n\nHuman:");
           if (humanIdx !== -1) {
-            body.prompt =
-              body.prompt.slice(0, humanIdx) +
-              "\n\nHuman: " +
-              ctx +
-              "\n\n" +
-              body.prompt.slice(humanIdx + "\n\nHuman: ".length);
+            const before = body.prompt.slice(0, humanIdx + "\n\nHuman: ".length);
+            const after = body.prompt.slice(humanIdx + "\n\nHuman: ".length);
+            body.prompt = before + ctx + "\n\n" + after;
           } else {
             body.prompt = ctx + "\n\n" + body.prompt;
           }
           injected = true;
+          console.log("[MemOS interceptor] injected into prompt field");
         }
 
-        // ── OpenAI / ChatGPT format: { messages: [{role, content}] } ──
+        // Claude / OpenAI format: { messages: [{role, content}] }
         else if (Array.isArray(body.messages)) {
           for (let i = body.messages.length - 1; i >= 0; i--) {
             const msg = body.messages[i];
             if (msg.role === "user" || msg.role === "human") {
               if (typeof msg.content === "string") {
                 msg.content = ctx + "\n\n" + msg.content;
-                injected = true;
               } else if (Array.isArray(msg.content)) {
-                // Vision/multi-modal format: [{type: "text", text: "..."}]
-                const textPart = msg.content.find(
-                  (p) => p.type === "text" && typeof p.text === "string"
-                );
-                if (textPart) {
-                  textPart.text = ctx + "\n\n" + textPart.text;
-                  injected = true;
-                } else {
-                  msg.content.unshift({ type: "text", text: ctx });
-                  injected = true;
-                }
+                const tp = msg.content.find((p) => p.type === "text");
+                if (tp) tp.text = ctx + "\n\n" + tp.text;
+                else msg.content.unshift({ type: "text", text: ctx });
               }
+              injected = true;
+              console.log("[MemOS interceptor] injected into messages field");
               break;
             }
           }
         }
 
-        // ── Gemini format: { contents: [{role, parts: [{text}]}] } ──
+        // Gemini format: { contents: [{role, parts: [{text}]}] }
         else if (Array.isArray(body.contents)) {
           for (let i = body.contents.length - 1; i >= 0; i--) {
             const item = body.contents[i];
             if (item.role === "user") {
               const parts = item.parts || [];
               const tp = parts.find((p) => typeof p.text === "string");
-              if (tp) {
-                tp.text = ctx + "\n\n" + tp.text;
-                injected = true;
-              }
+              if (tp) { tp.text = ctx + "\n\n" + tp.text; injected = true; }
               break;
             }
           }
+          if (injected) console.log("[MemOS interceptor] injected into contents field");
         }
 
-        if (injected) {
+        if (!injected) {
+          console.warn("[MemOS interceptor] body format not recognised — keys:", Object.keys(body).join(", "));
+          _pendingContext = ctx; // restore: try next request
+        } else {
           init = { ...init, body: JSON.stringify(body) };
         }
-        // If not injected (unknown format): request goes through unchanged
-      } catch {
-        // Parsing failed — forward original request, don't swallow the context
-        // (another request may match shortly)
-        _pendingContext = ctx;
+      } catch (err) {
+        console.warn("[MemOS interceptor] body parse failed:", err.message);
+        _pendingContext = ctx; // restore
       }
     }
 

@@ -1,13 +1,12 @@
 // content/gemini.js — MemOS memory injection for gemini.google.com
 // See content/claude.js for full architecture notes.
-// To update selectors: open gemini.google.com → F12 → Inspector → update below.
+// Update selectors: gemini.google.com → F12 → Inspector.
 
 (function () {
   "use strict";
 
   const PLATFORM = "gemini";
 
-  // ----- Selectors (May 2026) -----
   const INPUT_SELECTORS = [
     'div.ql-editor[contenteditable="true"]',
     'rich-textarea div[contenteditable="true"]',
@@ -24,37 +23,28 @@
     "model-response",
     ".model-response-text",
     '[data-message-author-role="assistant"]',
-    ".response-content",
+  ];
+  const USER_MSG_SELECTORS = [
+    ".user-query-text",
+    '[data-message-author-role="user"]',
+    ".human-turn",
   ];
 
   function getInputBox() {
-    for (const sel of INPUT_SELECTORS) {
-      const el = document.querySelector(sel);
-      if (el) return el;
-    }
+    for (const s of INPUT_SELECTORS) { const e = document.querySelector(s); if (e) return e; }
     return null;
   }
-
   function getSendButton() {
-    for (const sel of SEND_SELECTORS) {
-      const el = document.querySelector(sel);
-      if (el) return el;
-    }
+    for (const s of SEND_SELECTORS) { const e = document.querySelector(s); if (e) return e; }
     return null;
   }
-
   function getLastResponse() {
-    for (const sel of RESPONSE_SELECTORS) {
-      const els = document.querySelectorAll(sel);
-      if (els.length) return els[els.length - 1];
-    }
+    for (const s of RESPONSE_SELECTORS) { const els = document.querySelectorAll(s); if (els.length) return els[els.length - 1]; }
     return null;
   }
 
-  let _cachedQuery = null;
-  let _cachedRecall = null;
-  let _prefetchTimer = null;
-  let lastUserMessage = "";
+  let _cachedQuery = null, _cachedRecall = null, _prefetchTimer = null;
+  let lastUserMessage = "", _contextSentAt = null;
 
   function schedulePrefetch() {
     clearTimeout(_prefetchTimer);
@@ -62,11 +52,10 @@
       try {
         const input = getInputBox();
         if (!input) return;
-        const query = input.innerText.trim();
-        if (!query || query === _cachedQuery) return;
-        const result = await memosRecall(query, PLATFORM);
-        _cachedQuery = query;
-        _cachedRecall = result;
+        const q = input.innerText.trim();
+        if (!q || q === _cachedQuery) return;
+        const r = await memosRecall(q, PLATFORM);
+        _cachedQuery = q; _cachedRecall = r;
       } catch { /* server offline */ }
     }, 300);
   }
@@ -78,109 +67,100 @@
     input.addEventListener("input", schedulePrefetch);
   }
 
-  async function dispatchContext() {
-    const input = getInputBox();
-    if (!input) return;
-    const userMessage = input.innerText.trim();
-    if (!userMessage) return;
-
-    lastUserMessage = userMessage;
-
-    try {
-      let recall = (_cachedQuery === userMessage) ? _cachedRecall : null;
-      if (!recall) {
-        recall = await memosRecall(userMessage, PLATFORM);
-        _cachedQuery = userMessage;
-        _cachedRecall = recall;
-      }
-      if (recall && recall.context && recall.context.trim().length > 0) {
-        document.dispatchEvent(
-          new CustomEvent("__memos_inject_context", {
-            detail: `[context]\n${recall.context}\n[/context]`,
-          })
-        );
-      }
-    } catch { /* server offline — send without context */ }
+  function setInputContent(input, text) {
+    input.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    sel.removeAllRanges(); sel.addRange(range);
+    const ok = document.execCommand("insertText", false, text);
+    if (!ok) { input.innerText = text; input.dispatchEvent(new Event("input", { bubbles: true })); }
   }
 
-  let _bypassClick = false;
-  let _bypassEnter = false;
+  async function prepareContext(input) {
+    const userMessage = input.innerText.trim();
+    if (!userMessage) return;
+    lastUserMessage = userMessage;
+    try {
+      let recall = (_cachedQuery === userMessage) ? _cachedRecall : null;
+      if (!recall) recall = await memosRecall(userMessage, PLATFORM);
+      _cachedQuery = userMessage; _cachedRecall = recall;
+      if (recall && recall.context && recall.context.trim()) {
+        const ctxBlock = `[context]\n${recall.context}\n[/context]`;
+        window.postMessage({ __memos_type: "inject_context", context: ctxBlock }, "*");
+        _contextSentAt = Date.now();
+        setTimeout(() => {
+          if (_contextSentAt && Date.now() - _contextSentAt >= 1900) {
+            const inp = getInputBox();
+            const cur = inp ? inp.innerText.trim() : "";
+            if (inp && cur && !cur.startsWith("[context]")) setInputContent(inp, `${ctxBlock}\n\n${cur}`);
+            _contextSentAt = null;
+          }
+        }, 2000);
+      }
+    } catch { /* */ }
+  }
 
-  document.addEventListener(
-    "click",
-    async (e) => {
-      if (_bypassClick) return;
-      const sendBtn = getSendButton();
-      if (!sendBtn) return;
-      if (sendBtn !== e.target && !sendBtn.contains(e.target)) return;
-      const input = getInputBox();
-      if (!input || !input.innerText.trim()) return;
+  window.addEventListener("message", (e) => {
+    if (e.source === window && e.data?.__memos_type === "context_injected") _contextSentAt = null;
+  });
 
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      attachInputListener();
+  let _bypassClick = false, _bypassEnter = false;
 
-      await dispatchContext();
+  document.addEventListener("click", async (e) => {
+    if (_bypassClick) return;
+    const sendBtn = getSendButton();
+    if (!sendBtn || (sendBtn !== e.target && !sendBtn.contains(e.target))) return;
+    const input = getInputBox();
+    if (!input || !input.innerText.trim()) return;
+    e.preventDefault(); e.stopImmediatePropagation(); attachInputListener();
+    await prepareContext(input);
+    _bypassClick = true; sendBtn.click(); _bypassClick = false;
+  }, true);
 
-      _bypassClick = true;
-      sendBtn.click();
-      _bypassClick = false;
-    },
-    true
-  );
+  document.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter" || e.shiftKey || _bypassEnter) return;
+    const input = getInputBox();
+    if (!input) return;
+    if (!input.contains(document.activeElement) && document.activeElement !== input) return;
+    if (!input.innerText.trim()) return;
+    e.preventDefault(); e.stopImmediatePropagation();
+    await prepareContext(input);
+    _bypassEnter = true;
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    _bypassEnter = false;
+  }, true);
 
-  document.addEventListener(
-    "keydown",
-    async (e) => {
-      if (e.key !== "Enter" || e.shiftKey || _bypassEnter) return;
-      const input = getInputBox();
-      if (!input) return;
-      if (!input.contains(document.activeElement) && document.activeElement !== input) return;
-      if (!input.innerText.trim()) return;
+  function cleanUserMessages() {
+    for (const sel of USER_MSG_SELECTORS) {
+      document.querySelectorAll(sel).forEach((msg) => {
+        if (msg.dataset.memosClean || !msg.innerText.includes("[context]")) return;
+        msg.dataset.memosClean = "true";
+        try { msg.innerHTML = msg.innerHTML.replace(/\[context\][\s\S]*?\[\/context\]\n?\n?/g, ""); } catch { /* */ }
+      });
+    }
+  }
 
-      e.preventDefault();
-      e.stopImmediatePropagation();
-
-      await dispatchContext();
-
-      _bypassEnter = true;
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
-      );
-      _bypassEnter = false;
-    },
-    true
-  );
-
-  function waitForResponseToFinish(container, callback) {
+  function waitForStreamEnd(container, callback) {
     let timer = null;
-    const obs = new MutationObserver(() => {
-      clearTimeout(timer);
-      timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500);
-    });
+    const obs = new MutationObserver(() => { clearTimeout(timer); timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500); });
     obs.observe(container, { childList: true, subtree: true, characterData: true });
     timer = setTimeout(() => { obs.disconnect(); callback(); }, 1500);
   }
 
   const pageObserver = new MutationObserver(() => {
+    try { cleanUserMessages(); } catch { /* */ }
     try {
-      const lastResponse = getLastResponse();
-      if (!lastResponse || lastResponse.dataset.memosProcessed) return;
-      lastResponse.dataset.memosProcessed = "true";
-      waitForResponseToFinish(lastResponse, () => {
-        try {
-          const assistantText = lastResponse.innerText.trim();
-          if (assistantText && lastUserMessage) {
-            memosRemember(lastUserMessage, assistantText, PLATFORM);
-            lastUserMessage = "";
-          }
-        } catch { /* fail silently */ }
+      const last = getLastResponse();
+      if (!last || last.dataset.memosProcessed) return;
+      last.dataset.memosProcessed = "true";
+      waitForStreamEnd(last, () => {
+        try { const t = last.innerText.trim(); if (t && lastUserMessage) { memosRemember(lastUserMessage, t, PLATFORM); lastUserMessage = ""; } } catch { /* */ }
       });
-    } catch { /* fail silently */ }
+    } catch { /* */ }
   });
 
   pageObserver.observe(document.body, { childList: true, subtree: true });
-
   attachInputListener();
   setTimeout(attachInputListener, 2000);
 })();

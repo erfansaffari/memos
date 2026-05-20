@@ -1,25 +1,25 @@
 // content/claude.js — MemOS memory injection for claude.ai
 //
-// Architecture:
-//   - shared/interceptor.js (main world) overrides window.fetch and waits for
-//     a "__memos_inject_context" CustomEvent. When the platform sends an API
-//     request, interceptor.js injects the context at the network level.
-//     The user's input box is NEVER modified — context is invisible in the UI.
-//   - This script (isolated world) does two things:
-//       1. Prefetch: call memosRecall while the user is still typing (debounced
-//          300ms) so the result is cached before they hit send.
-//       2. On send: dispatch the cached context to the interceptor, then let the
-//          original click/keydown proceed normally (no blocking).
+// How context gets injected (invisible to user):
+//   shared/interceptor.js (MAIN world) overrides window.fetch.
+//   This script sends context to it via window.postMessage (guaranteed
+//   cross-world because postMessage uses structured cloning).
+//   The context is injected directly into Claude's API request body
+//   so it never appears in the input box or conversation history UI.
 //
-// To update selectors when Claude changes its UI:
-//   Open claude.ai → F12 → Inspector → find the element → update below.
+// Fallback: if fetch interception didn't consume the context within 2 s
+//   (body format mismatch), we fall back to prepending it in the input box.
+//   In that case a DOM cleanup observer hides the [context] block from the
+//   chat history immediately after Claude renders the user's message bubble.
+//
+// To update selectors: open claude.ai → F12 → Inspector → update below.
 
 (function () {
   "use strict";
 
   const PLATFORM = "claude";
 
-  // ----- Selectors (May 2026) -----
+  // ----- DOM Selectors (May 2026) -----
   const INPUT_SELECTORS = [
     'div[contenteditable="true"][data-testid="message-input"]',
     'div.ProseMirror[contenteditable="true"]',
@@ -35,37 +35,31 @@
     '[data-testid="assistant-message"]',
     '.font-claude-message',
     '[data-message-author-role="assistant"]',
-    '.assistant-message',
+  ];
+  const USER_MSG_SELECTORS = [
+    '[data-testid="user-message"]',
+    '[data-message-author-role="user"]',
+    '.font-human-message',
+    '.human-turn',
   ];
 
   function getInputBox() {
-    for (const sel of INPUT_SELECTORS) {
-      const el = document.querySelector(sel);
-      if (el) return el;
-    }
+    for (const s of INPUT_SELECTORS) { const e = document.querySelector(s); if (e) return e; }
     return null;
   }
-
   function getSendButton() {
-    for (const sel of SEND_SELECTORS) {
-      const el = document.querySelector(sel);
-      if (el) return el;
-    }
+    for (const s of SEND_SELECTORS) { const e = document.querySelector(s); if (e) return e; }
     return null;
   }
-
   function getLastResponse() {
-    for (const sel of RESPONSE_SELECTORS) {
-      const els = document.querySelectorAll(sel);
-      if (els.length) return els[els.length - 1];
-    }
+    for (const s of RESPONSE_SELECTORS) { const els = document.querySelectorAll(s); if (els.length) return els[els.length - 1]; }
     return null;
   }
 
   // ---------------------------------------------------------------------------
-  // Prefetch cache — populated while the user is still typing
+  // Prefetch cache — fills while the user is still typing so there's
+  // zero wait when they hit send.
   // ---------------------------------------------------------------------------
-
   let _cachedQuery = null;
   let _cachedRecall = null;
   let _prefetchTimer = null;
@@ -77,18 +71,16 @@
       try {
         const input = getInputBox();
         if (!input) return;
-        const query = input.innerText.trim();
-        if (!query || query === _cachedQuery) return;
-        const result = await memosRecall(query, PLATFORM);
-        _cachedQuery = query;
-        _cachedRecall = result;
-      } catch {
-        // server offline — ignore
-      }
+        const q = input.innerText.trim();
+        if (!q || q === _cachedQuery) return;
+        const r = await memosRecall(q, PLATFORM);
+        _cachedQuery = q;
+        _cachedRecall = r;
+        console.log("[MemOS] prefetched context for query:", q.slice(0, 40));
+      } catch { /* server offline */ }
     }, 300);
   }
 
-  // Attach prefetch listener once the input appears
   function attachInputListener() {
     const input = getInputBox();
     if (!input || input._memosListening) return;
@@ -97,102 +89,142 @@
   }
 
   // ---------------------------------------------------------------------------
-  // Dispatch context to the main-world fetch interceptor
+  // Set content in the React-controlled contenteditable
   // ---------------------------------------------------------------------------
-
-  async function dispatchContext() {
-    const input = getInputBox();
-    if (!input) return;
-    const userMessage = input.innerText.trim();
-    if (!userMessage) return;
-
-    lastUserMessage = userMessage;
-
-    try {
-      // Use cached result if the query matches; otherwise fetch now (cold send)
-      let recall = (_cachedQuery === userMessage) ? _cachedRecall : null;
-      if (!recall) {
-        recall = await memosRecall(userMessage, PLATFORM);
-        _cachedQuery = userMessage;
-        _cachedRecall = recall;
-      }
-
-      if (recall && recall.context && recall.context.trim().length > 0) {
-        document.dispatchEvent(
-          new CustomEvent("__memos_inject_context", {
-            detail: `[context]\n${recall.context}\n[/context]`,
-          })
-        );
-      }
-    } catch {
-      // server offline — send without context
+  function setInputContent(input, text) {
+    input.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(input);
+    sel.removeAllRanges();
+    sel.addRange(range);
+    const ok = document.execCommand("insertText", false, text);
+    if (!ok) {
+      input.innerText = text;
+      input.dispatchEvent(new Event("input", { bubbles: true }));
     }
   }
 
   // ---------------------------------------------------------------------------
-  // Send interception — dispatch context then let the original event through
-  // The send button click and Enter key are NOT blocked; we just fire-and-forget
-  // the context dispatch and let the platform's own handler run normally.
-  // Since the interceptor operates at the fetch level, timing is fine as long
-  // as dispatchContext() resolves before the platform's fetch call is made.
-  // For cached results this is synchronous; for cold sends, we still block
-  // briefly (< 200ms over localhost).
+  // On send: get (or fetch) recall context, tell the interceptor, then
+  // if the interceptor didn't consume it within 2 s fall back to injecting
+  // the context directly into the input box.
   // ---------------------------------------------------------------------------
+  let _contextSentAt = null;
 
+  async function prepareContext(input) {
+    const userMessage = input.innerText.trim();
+    if (!userMessage) return;
+    lastUserMessage = userMessage;
+
+    try {
+      let recall = (_cachedQuery === userMessage) ? _cachedRecall : null;
+      if (!recall) recall = await memosRecall(userMessage, PLATFORM);
+      _cachedQuery = userMessage;
+      _cachedRecall = recall;
+
+      if (recall && recall.context && recall.context.trim()) {
+        const ctxBlock = `[context]\n${recall.context}\n[/context]`;
+
+        // Primary: send to fetch interceptor via postMessage (cross-world safe)
+        window.postMessage({ __memos_type: "inject_context", context: ctxBlock }, "*");
+        _contextSentAt = Date.now();
+        console.log("[MemOS] context dispatched to interceptor");
+
+        // Fallback: if interceptor didn't consume within 2 s, inject into input
+        setTimeout(() => {
+          if (_contextSentAt && Date.now() - _contextSentAt >= 1900) {
+            // Interceptor didn't fire — inject into input as fallback
+            const inp = getInputBox();
+            const currentMsg = inp ? inp.innerText.trim() : "";
+            if (inp && currentMsg && !currentMsg.startsWith("[context]")) {
+              console.log("[MemOS] fallback: injecting into input box");
+              setInputContent(inp, `${ctxBlock}\n\n${currentMsg}`);
+            }
+            _contextSentAt = null;
+          }
+        }, 2000);
+      }
+    } catch { /* server offline */ }
+  }
+
+  // Called by interceptor.js (MAIN world) after successful injection
+  window.addEventListener("message", (e) => {
+    if (e.source !== window) return;
+    if (e.data?.__memos_type === "context_injected") {
+      _contextSentAt = null; // cancel fallback
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Intercept send button click and Enter key
+  // ---------------------------------------------------------------------------
   let _bypassClick = false;
   let _bypassEnter = false;
 
-  document.addEventListener(
-    "click",
-    async (e) => {
-      if (_bypassClick) return;
-      const sendBtn = getSendButton();
-      if (!sendBtn) return;
-      if (sendBtn !== e.target && !sendBtn.contains(e.target)) return;
-      const input = getInputBox();
-      if (!input || !input.innerText.trim()) return;
+  document.addEventListener("click", async (e) => {
+    if (_bypassClick) return;
+    const sendBtn = getSendButton();
+    if (!sendBtn || (sendBtn !== e.target && !sendBtn.contains(e.target))) return;
+    const input = getInputBox();
+    if (!input || !input.innerText.trim()) return;
 
-      e.preventDefault();
-      e.stopImmediatePropagation();
-      attachInputListener();
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    attachInputListener();
 
-      await dispatchContext();
+    await prepareContext(input);
 
-      _bypassClick = true;
-      sendBtn.click();
-      _bypassClick = false;
-    },
-    true
-  );
+    _bypassClick = true;
+    sendBtn.click();
+    _bypassClick = false;
+  }, true);
 
-  document.addEventListener(
-    "keydown",
-    async (e) => {
-      if (e.key !== "Enter" || e.shiftKey || _bypassEnter) return;
-      const input = getInputBox();
-      if (!input) return;
-      if (!input.contains(document.activeElement) && document.activeElement !== input) return;
-      if (!input.innerText.trim()) return;
+  document.addEventListener("keydown", async (e) => {
+    if (e.key !== "Enter" || e.shiftKey || _bypassEnter) return;
+    const input = getInputBox();
+    if (!input) return;
+    if (!input.contains(document.activeElement) && document.activeElement !== input) return;
+    if (!input.innerText.trim()) return;
 
-      e.preventDefault();
-      e.stopImmediatePropagation();
+    e.preventDefault();
+    e.stopImmediatePropagation();
 
-      await dispatchContext();
+    await prepareContext(input);
 
-      _bypassEnter = true;
-      input.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true })
-      );
-      _bypassEnter = false;
-    },
-    true
-  );
+    _bypassEnter = true;
+    input.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter", code: "Enter", keyCode: 13, which: 13,
+      bubbles: true, cancelable: true
+    }));
+    _bypassEnter = false;
+  }, true);
 
   // ---------------------------------------------------------------------------
-  // Response observer — store memories after AI finishes responding
+  // DOM cleanup: if fallback ran and context block ended up in the chat
+  // history, strip it from the rendered user message bubble immediately.
   // ---------------------------------------------------------------------------
+  function cleanUserMessages() {
+    for (const sel of USER_MSG_SELECTORS) {
+      const msgs = document.querySelectorAll(sel);
+      msgs.forEach((msg) => {
+        if (msg.dataset.memosClean) return;
+        if (!msg.innerText.includes("[context]")) return;
+        msg.dataset.memosClean = "true";
+        try {
+          msg.innerHTML = msg.innerHTML.replace(
+            /\[context\][\s\S]*?\[\/context\]\n?\n?/g, ""
+          );
+          console.log("[MemOS] stripped context block from chat bubble");
+        } catch { /* fail silently */ }
+      });
+    }
+  }
 
-  function waitForResponseToFinish(container, callback) {
+  // ---------------------------------------------------------------------------
+  // Response observer: store memories after the AI finishes responding
+  // ---------------------------------------------------------------------------
+  function waitForStreamEnd(container, callback) {
     let timer = null;
     const obs = new MutationObserver(() => {
       clearTimeout(timer);
@@ -203,26 +235,27 @@
   }
 
   const pageObserver = new MutationObserver(() => {
+    // Clean up any context blocks that appeared in user message bubbles
+    try { cleanUserMessages(); } catch { /* */ }
+
+    // Watch for new assistant responses
     try {
-      const lastResponse = getLastResponse();
-      if (!lastResponse || lastResponse.dataset.memosProcessed) return;
-      lastResponse.dataset.memosProcessed = "true";
-      waitForResponseToFinish(lastResponse, () => {
+      const last = getLastResponse();
+      if (!last || last.dataset.memosProcessed) return;
+      last.dataset.memosProcessed = "true";
+      waitForStreamEnd(last, () => {
         try {
-          const assistantText = lastResponse.innerText.trim();
-          if (assistantText && lastUserMessage) {
-            memosRemember(lastUserMessage, assistantText, PLATFORM);
+          const text = last.innerText.trim();
+          if (text && lastUserMessage) {
+            memosRemember(lastUserMessage, text, PLATFORM);
             lastUserMessage = "";
           }
-        } catch { /* fail silently */ }
+        } catch { /* */ }
       });
-    } catch { /* fail silently */ }
+    } catch { /* */ }
   });
 
   pageObserver.observe(document.body, { childList: true, subtree: true });
-
-  // Attach prefetch listener as soon as the page is usable
   attachInputListener();
-  // Retry in case the input renders after script execution
   setTimeout(attachInputListener, 2000);
 })();
